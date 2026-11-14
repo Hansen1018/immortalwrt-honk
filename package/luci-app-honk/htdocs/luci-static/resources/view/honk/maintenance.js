@@ -31,23 +31,20 @@ const DATA_PATHS = {
 // `default` keeps both URLs empty, so the sources are the core's own built-in
 // list (MetaCubeX, raw first and jsDelivr where GitHub is slow) — one list
 // for the core, update-geo.sh and this page.
+//
+// Only the sources the core can use are offered: the lite file lacks the
+// categories the rules use (the core refuses it and keeps the current file)
+// and the v2fly addresses are GitHub release links that redirect (the core
+// does not follow redirects).
 const GEO_PRESETS = {
 	default: { geoip: '', geosite: '' },
 	metacubex: {
 		geoip: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip.dat',
 		geosite: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite.dat'
 	},
-	'metacubex-lite': {
-		geoip: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip-lite.dat',
-		geosite: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite-lite.dat'
-	},
 	loyalsoldier: {
 		geoip: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat',
 		geosite: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat'
-	},
-	v2fly: {
-		geoip: 'https://github.com/v2fly/geoip/releases/latest/download/geoip.dat',
-		geosite: 'https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat'
 	}
 };
 
@@ -235,9 +232,7 @@ return view.extend({
 			const presetSel = E('select', { 'class': 'cbi-input-select', 'id': 'honk-geo-preset' }, [
 				E('option', { 'value': 'default' }, _("Default (the core's own list)")),
 				E('option', { 'value': 'metacubex' }, 'MetaCubeX'),
-				E('option', { 'value': 'metacubex-lite' }, 'MetaCubeX Lite'),
 				E('option', { 'value': 'loyalsoldier' }, 'Loyalsoldier'),
-				E('option', { 'value': 'v2fly' }, 'v2fly'),
 				E('option', { 'value': 'custom' }, _('Custom'))
 			]);
 			presetSel.value = preset0;

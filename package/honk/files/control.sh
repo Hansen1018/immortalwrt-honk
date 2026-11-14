@@ -424,6 +424,9 @@ geodata_status() {
 # 用户在 LuCI 里选过来源（honk.main.<type>_url）就写那个来源的镜像组：核心那边
 # 也一样，两条路径才拿同样的字节，面板的下拉也显示同一个来源。
 #
+# 两种来源我们不用，写默认那一份：精简版（分类不够，核心拒绝那份文件）与 v2fly
+# （地址会重定向，核心不跟随）。
+#
 # 什么时候写：我们那份混着两个来源的旧列表要清掉（清掉之后核心用它自己的内
 # 置列表）；用户在 LuCI 里选过来源就写他选的那个；用户在面板里自己设的列表不
 # 动 —— 那是他的选择。
@@ -460,6 +463,20 @@ geodata_sources() {
 		urls='[null,null]'
 		;;
 	esac
+	# 我们不用的两种来源，改用默认那一份（核心自己的内置列表）：
+	#   精简版那份文件缺少规则用到的分类（apple-cn、category-* 等），核心更新时
+	#   会拒绝它（asset_validation_failed）并沿用当前的文件 —— 面板报的就是
+	#   「新的地理数据文件未通过校验：文件无法解析，或缺少规则使用的分类」；
+	#   v2fly 那个地址是 GitHub release 的下载链接，会 302 重定向，核心不跟随
+	#   重定向，下载必然失败（http_status_rejected）。
+	case "$record$(geodata_configured_url)" in
+	*-lite.dat*|*v2fly*|*domain-list-community*)
+		if [ -n "$urls" ]; then
+			logger -t honk "the stored geodata source cannot work with the core; the default list is used"
+		fi
+		urls='[null,null]'
+		;;
+	esac
 	# 用户在 LuCI 里选过来源：写他选的那个来源的镜像组（面板的下拉才认得出是
 	# 哪个来源）。没选过就留着库里现在的 —— 面板里自己选的，或核心的内置列表。
 	if [ -z "$urls" ] && [ -n "$(geodata_configured_url)" ]; then
@@ -479,12 +496,12 @@ geodata_sources() {
 	if [ "$(sqlite3 "$db" 'SELECT count(*) FROM geodata_settings WHERE id=1;' 2>/dev/null)" != 1 ]; then
 		row='[null,null]'
 		[ -n "$(geodata_configured_url)" ] && row="$urls"
-		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row'), 'download', json('{\"route\":{\"route\":\"direct\"}}')));" >/dev/null 2>&1; then
+		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row')));" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
 			return 1
 		fi
 	fi
-	logger -t honk "the geodata sources are stored in the state db (one source, the download goes direct)"
+	logger -t honk "the geodata sources are stored in the state db (one source)"
 	echo '{"ok":true,"message":"sources_stored"}'
 }
 
