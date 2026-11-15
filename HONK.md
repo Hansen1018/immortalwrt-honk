@@ -261,9 +261,16 @@ SQLite 的 WAL 模式**：建管理员时记录先写进 `honk.db-wal`，要等 
   启动会再试一次；
 - `DAE_LOCATION_ASSET` 指向数据目录，核心因此在数据目录里找、在数据目录里替换。
 
-**源是一个来源，不是几个来源混在一起**：上游原版那一份（MetaCubeX 的
-`meta-rules-dat`：`raw.githubusercontent`，然后是 GitHub 慢的时候走的 `jsDelivr`），
-两个地址是**同一个文件**的镜像，一个不通就换下一个，拿到的始终是同一份规则集。
+**源是一个来源，不是几个来源混在一起**：默认那一份（Loyalsoldier/v2ray-rules-dat 的
+`raw.githubusercontent`，然后是 GitHub 慢的时候走的 `jsDelivr`），两个地址是**同一个
+文件**的镜像，一个不通就换下一个，拿到的始终是同一份规则集。
+
+**下载的来源要和规则对着写的那份文件同源**：核心更新时会检查新文件是否定义了规则用
+到的每一个分类，缺一个就拒绝那份文件并沿用当前的（面板报「新的地理数据文件未通过校验：
+文件无法解析，或缺少规则使用的分类」）。软件包带的是 v2fly 的 domain-list-community 与
+v2fly 的 geoip（v2ray-geodata 两个包），规则是对着它们写的，所以默认下载
+Loyalsoldier/v2ray-rules-dat —— 同一份 v2fly 数据（外加 `@cn` 这些属性），而且地址
+不重定向（v2fly 自己的发布地址会 302，核心不跟随重定向）。
 
 这一点是面板的下拉决定的：它按**来源**（它那边叫 tag：`metacubex` /
 `metacubex-lite` / `loyalsoldier`）匹配 —— 两个文件的地址必须都在同一个来源的
@@ -272,8 +279,8 @@ SQLite 的 WAL 模式**：建管理员时记录先写进 `honk.db-wal`，要等 
 对不上，更新会被核心拒掉（面板报「新的地理数据文件未通过校验：文件无法解析，或缺少
 规则使用的分类」）。
 
-LuCI 的「Source」下拉里一个来源一个选项：默认（核心自己的内置列表）、MetaCubeX、
-Loyalsoldier、自定义。选了哪个来源，写进状态库的就是那个来源的镜像组
+LuCI 的「Source」下拉里一个来源一个选项：默认（Loyalsoldier/v2ray-rules-dat，和软件包
+带的那两份文件同源）、MetaCubeX、自定义。选了哪个来源，写进状态库的就是那个来源的镜像组
 （`control.sh geodata-sources`，核心启动时读进去），面板的下拉于是显示同一个来源。
 
 **有两种来源我们不用**（下拉里没有，选到了也改用默认那一份）：

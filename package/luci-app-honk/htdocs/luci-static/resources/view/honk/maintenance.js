@@ -28,23 +28,23 @@ const DATA_PATHS = {
 // Geo data source presets. One preset is one source (the panel calls it a
 // tag): only the addresses of that source, so the panel's own dropdown
 // recognises it instead of falling back to "custom" with a list of addresses.
-// `default` keeps both URLs empty, so the sources are the core's own built-in
-// list (MetaCubeX, raw first and jsDelivr where GitHub is slow) — one list
-// for the core, update-geo.sh and this page.
+// `default` is the source the packaged geo files come from (the v2fly data,
+// as Loyalsoldier/v2ray-rules-dat serves it): the core refuses a download that
+// does not define every category the rules use, so the source has to be the one
+// the rules were written against.
 //
 // Only the sources the core can use are offered: the lite file lacks the
 // categories the rules use (the core refuses it and keeps the current file)
 // and the v2fly addresses are GitHub release links that redirect (the core
 // does not follow redirects).
 const GEO_PRESETS = {
-	default: { geoip: '', geosite: '' },
+	default: {
+		geoip: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat',
+		geosite: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat'
+	},
 	metacubex: {
 		geoip: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip.dat',
 		geosite: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite.dat'
-	},
-	loyalsoldier: {
-		geoip: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat',
-		geosite: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat'
 	}
 };
 

@@ -456,11 +456,11 @@ geodata_sources() {
 	# 库里留着的地址：我们写的那份混着两个来源（MetaCubeX + Loyalsoldier）要清掉
 	# —— 面板的下拉按来源匹配，混着它认不出来，会落回「自定义」把四个地址一
 	# 起塞进去；兜底时还可能换到另一份规则集（分类对不上，更新会被核心拒掉）。
-	# 清掉之后核心用它自己的内置列表：上游原版那一份，一个来源。
+	# 清掉之后写默认那一份：一个来源，和软件包带的那两份文件同源。
 	urls=''
 	case "$record" in
 	*MetaCubeX*Loyalsoldier*|*Loyalsoldier*MetaCubeX*)
-		urls='[null,null]'
+		urls="$(geodata_default_list_json)"
 		;;
 	esac
 	# 我们不用的两种来源，改用默认那一份（核心自己的内置列表）：
@@ -474,7 +474,7 @@ geodata_sources() {
 		if [ -n "$urls" ]; then
 			logger -t honk "the stored geodata source cannot work with the core; the default list is used"
 		fi
-		urls='[null,null]'
+		urls="$(geodata_default_list_json)"
 		;;
 	esac
 	# 用户在 LuCI 里选过来源：写他选的那个来源的镜像组（面板的下拉才认得出是
@@ -494,7 +494,7 @@ geodata_sources() {
 		fi
 	fi
 	if [ "$(sqlite3 "$db" 'SELECT count(*) FROM geodata_settings WHERE id=1;' 2>/dev/null)" != 1 ]; then
-		row='[null,null]'
+		row="$(geodata_default_list_json)"
 		[ -n "$(geodata_configured_url)" ] && row="$urls"
 		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row')));" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
@@ -509,6 +509,13 @@ geodata_sources() {
 # 默认那一份（上游原版：MetaCubeX）。
 geodata_desired_list() {
 	honk_geodata_configured_list "$1"
+}
+
+# 默认那一份清单，写成核心存的那个 JSON 数组。
+geodata_default_list_json() {
+	printf '[{"urls":%s,"from_config":false},{"urls":%s,"from_config":false}]' \
+		"$(honk_geodata_sources geosite | geodata_urls_json)" \
+		"$(honk_geodata_sources geoip | geodata_urls_json)"
 }
 
 # 用户在 LuCI 里选过来源没有（有输出就是选过）。

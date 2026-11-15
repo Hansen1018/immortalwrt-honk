@@ -38,8 +38,8 @@ honk_geodata_strip() {
 }
 
 
-# 地理数据的下载源列表：上游原版那一份（MetaCubeX 的 raw 与 jsDelivr 镜像），
-# 也就是核心自己的内置列表。
+# 地理数据的下载源列表：默认那一份（Loyalsoldier/v2ray-rules-dat 的 raw 与
+# jsDelivr 镜像），和软件包带的那两份文件同源。
 #
 # 面板的下拉是按「来源」（它那边叫 tag）匹配的：metacubex / metacubex-lite /
 # loyalsoldier。一个列表只能是一个来源：混着两个来源它认不出来，会落回
@@ -53,8 +53,33 @@ honk_geodata_strip() {
 # 的字节才一样，不会互相覆盖。
 #
 # honk_geodata_sources <geosite|geoip>
-#   默认那一份（上游原版：MetaCubeX）的地址，一个一行，按顺序。
+#   默认那一份的地址，一个一行，按顺序。
+#
+#   默认是 Loyalsoldier/v2ray-rules-dat：它和软件包带的那两份文件
+#   （v2ray-geodata 的 v2fly domain-list-community 与 v2fly geoip）是同一份
+#   数据（外加 @cn 这些属性）。核心更新时会检查新文件是否定义了规则用到的每一个
+#   分类，缺一个就拒绝那份文件并沿用当前的（面板报「新的地理数据文件未通过校
+#   验」）。所以下载的来源要和规则对着写的那份文件同源，否则更新会被拒。
+#   v2fly 自己的发布地址会 302 重定向，核心不跟随重定向，所以用这一份。
 honk_geodata_sources() {
+	case "$1" in
+	geosite)
+		printf '%s\n' \
+			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat' \
+			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat'
+		;;
+	geoip)
+		printf '%s\n' \
+			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat' \
+			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat'
+		;;
+	*) return 1 ;;
+	esac
+}
+
+# 另一个来源：MetaCubeX 的 meta-rules-dat（Clash 风格的那一套分类，核心自带的
+# 内置列表也是这一份）。
+honk_geodata_metacubex_sources() {
 	case "$1" in
 	geosite)
 		printf '%s\n' \
@@ -87,21 +112,10 @@ honk_geodata_lite_sources() {
 	esac
 }
 
-# 第三个来源：Loyalsoldier 的 v2ray-rules-dat（同样是 raw 加 jsDelivr 镜像）。
+# 第三个来源：Loyalsoldier 的 v2ray-rules-dat（同样是 raw 加 jsDelivr 镜像）——
+# 与默认那一份相同，留着这个名字是为了兼容旧配置。
 honk_geodata_loyal_sources() {
-	case "$1" in
-	geosite)
-		printf '%s\n' \
-			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat' \
-			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat'
-		;;
-	geoip)
-		printf '%s\n' \
-			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat' \
-			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat'
-		;;
-	*) return 1 ;;
-	esac
+	honk_geodata_sources "$1"
 }
 
 # 这个地址属于哪个来源：打印「来源 名 文件类型」（geosite / geoip），
@@ -133,7 +147,7 @@ honk_geodata_list_for() {
 	entry=$(honk_geodata_source_of "$1") || { printf '%s\n' "$1"; return 0; }
 	src=${entry%% *}
 	case "$src" in
-	metacubex) honk_geodata_sources "$2" ;;
+	metacubex) honk_geodata_metacubex_sources "$2" ;;
 	metacubex-lite) honk_geodata_lite_sources "$2" ;;
 	loyalsoldier) honk_geodata_loyal_sources "$2" ;;
 	*) printf '%s\n' "$1" ;;
