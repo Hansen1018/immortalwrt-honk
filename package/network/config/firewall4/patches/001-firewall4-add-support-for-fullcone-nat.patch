@@ -22,7 +22,7 @@ Renew: ZiMing Mo <msylgj@immortalwrt.org>
 
 --- a/root/etc/config/firewall
 +++ b/root/etc/config/firewall
-@@ -3,6 +3,10 @@
+@@ -3,6 +3,10 @@ config defaults
  	option input		REJECT
  	option output		ACCEPT
  	option forward		REJECT
