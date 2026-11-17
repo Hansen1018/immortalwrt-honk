@@ -38,16 +38,21 @@ honk_geodata_strip() {
 }
 
 
-# 地理数据的下载源列表：默认那一份（Loyalsoldier/v2ray-rules-dat 的 raw 与
-# jsDelivr 镜像），和软件包带的那两份文件同源。
+# 地理数据的下载源列表：默认那一份（Loyalsoldier/v2ray-rules-dat 的 jsDelivr
+# 镜像与 raw 备用地址），和软件包带的那两份文件同源。
 #
 # 面板的下拉是按「来源」（它那边叫 tag）匹配的：metacubex / metacubex-lite /
 # loyalsoldier。一个列表只能是一个来源：混着两个来源它认不出来，会落回
 # 「自定义」把几个地址一起塞进去；兜底时还可能换到另一份规则集（分类对不
 # 上，更新会被核心拒掉）。
 #
-# 所以这里一份清单就是一个来源的镜像组：raw 加几个 jsDelivr 节点，一个不通
-# 就换下一个 —— 拿到的始终是同一份文件（同一份规则集，分类才对得上）。
+# 所以这里一份清单就是一个来源的镜像组：一个不通就换下一个 —— 拿到的始终是同一份
+# 文件（同一份规则集，分类才对得上）。
+#
+# 镜像的顺序：jsDelivr 的 CDN 在前、raw 在后。CDN 在墙内直连也通（走代理也通），
+# raw.githubusercontent.com 在墙内是不通的，DNS 也可能被污染 —— 放在前面只会白等
+# 一次超时，走代理时也可能连到被污染的地址。CDN 服务的是同一份文件，它旁边的
+# .sha256sum 也是同一份，校验对得上。
 #
 # 面板的「立即更新」与 LuCI 的「更新」用同一份列表、同一个顺序，两条路径拿到
 # 的字节才一样，不会互相覆盖。
@@ -65,13 +70,13 @@ honk_geodata_sources() {
 	case "$1" in
 	geosite)
 		printf '%s\n' \
-			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat' \
-			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat'
+			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat' \
+			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat'
 		;;
 	geoip)
 		printf '%s\n' \
-			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat' \
-			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat'
+			'https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat' \
+			'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat'
 		;;
 	*) return 1 ;;
 	esac
@@ -83,13 +88,13 @@ honk_geodata_metacubex_sources() {
 	case "$1" in
 	geosite)
 		printf '%s\n' \
-			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite.dat' \
-			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat'
+			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat' \
+			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite.dat'
 		;;
 	geoip)
 		printf '%s\n' \
-			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip.dat' \
-			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat'
+			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat' \
+			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip.dat'
 		;;
 	*) return 1 ;;
 	esac
@@ -100,13 +105,13 @@ honk_geodata_lite_sources() {
 	case "$1" in
 	geosite)
 		printf '%s\n' \
-			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite-lite.dat' \
-			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite-lite.dat'
+			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite-lite.dat' \
+			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite-lite.dat'
 		;;
 	geoip)
 		printf '%s\n' \
-			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip-lite.dat' \
-			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip-lite.dat'
+			'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip-lite.dat' \
+			'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip-lite.dat'
 		;;
 	*) return 1 ;;
 	esac

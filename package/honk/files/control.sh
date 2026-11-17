@@ -431,8 +431,10 @@ geodata_status() {
 # 置列表）；用户在 LuCI 里选过来源就写他选的那个；用户在面板里自己设的列表不
 # 动 —— 那是他的选择。
 #
-# 下载出口：不写。出口由路由规则决定（上游也不写出口，面板里可以自己选）——
-# 我们不替用户决定地理数据该走哪条路。
+# 下载出口：默认写直连。清单里第一个地址是 jsDelivr 的 CDN，墙内直连也通，走
+# 代理也通 —— 这些地址不需要代理。走代理要代理组里有能到达的节点，墙内常常没有，
+# 面板的「立即更新」于是卡在下载阶段。用户在面板里改过出口（存着的）就不动：那
+# 是他的选择。
 
 geodata_sources() {
 	db=/etc/honk/state/honk.db
@@ -441,17 +443,9 @@ geodata_sources() {
 	# 下次启动才生效。
 	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
 	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
-	# 一次性迁移：上一版我们自己写进去的直连出口。出口归路由规则管（上游也不
-	# 写出口，面板里也能自己选），所以清掉它。清一次就够：之后面板里选什么
-	# 就是什么。
-	if [ ! -e /etc/honk/.geodata-route-migrated ]; then
-		route_now=$(sqlite3 "$db" "SELECT json_extract(record, '\$.download.route.route') FROM geodata_settings WHERE id=1;" 2>/dev/null)
-		if [ "$route_now" = direct ]; then
-			sqlite3 "$db" "UPDATE geodata_settings SET record = json_remove(record, '\$.download') WHERE id = 1;" >/dev/null 2>&1 || :
-			logger -t honk "the direct geodata download route is gone; the routing rules decide again"
-		fi
-		: > /etc/honk/.geodata-route-migrated 2>/dev/null || :
-	fi
+	# 下载出口：这些地址不需要代理（清单里第一个是 CDN，墙内直连也通），所以默认
+	# 写直连。用户在面板里改过出口（库里存着的）就不动，那是他的选择。
+	route_stored=$(sqlite3 "$db" "SELECT coalesce(json_type(record, '\$.download'), 'null') FROM geodata_settings WHERE id=1;" 2>/dev/null)
 	record=$(sqlite3 "$db" 'SELECT record FROM geodata_settings WHERE id=1;' 2>/dev/null)
 	# 库里留着的地址：我们写的那份混着两个来源（MetaCubeX + Loyalsoldier）要清掉
 	# —— 面板的下拉按来源匹配，混着它认不出来，会落回「自定义」把四个地址一
@@ -484,9 +478,23 @@ geodata_sources() {
 			"$(geodata_desired_list geosite | geodata_urls_json)" \
 			"$(geodata_desired_list geoip | geodata_urls_json)")
 	fi
+	# 库里留着的清单：如果它是我们认识的那个来源的镜像组，就换成那个来源现在的
+	# 镜像组（顺序变了：CDN 在前）。来源不变，面板的下拉还是认得出；换的只是镜像
+	# 的顺序与地址。设备上留着的还是旧顺序（raw 在前），raw 在墙内不通，面板的
+	# 「立即更新」于是卡在下载阶段。用户在面板里自己填的清单（认不出来的地址）
+	# 原样留着。
+	if [ -z "$urls" ]; then
+		urls=$(geodata_refreshed_urls_json "$db")
+	fi
 	# 要改的字段
 	sets=''
 	[ -n "$urls" ] && sets="'\$.urls', json('$urls')"
+	# 出口：库里没有存过的时候写直连。存着的就不动 —— 那是用户在面板里选的。
+	download_part="'\$.download', json('{\"route\":{\"route\":\"direct\"}}')"
+	if [ "$route_stored" != object ]; then
+		[ -n "$sets" ] && sets="$sets, "
+		sets="$sets$download_part"
+	fi
 	if [ -n "$sets" ]; then
 		if ! sqlite3 "$db" "UPDATE geodata_settings SET record = json_set(CASE WHEN json_valid(record) THEN record ELSE '{}' END, $sets) WHERE id = 1;" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
@@ -496,7 +504,7 @@ geodata_sources() {
 	if [ "$(sqlite3 "$db" 'SELECT count(*) FROM geodata_settings WHERE id=1;' 2>/dev/null)" != 1 ]; then
 		row="$(geodata_default_list_json)"
 		[ -n "$(geodata_configured_url)" ] && row="$urls"
-		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row')));" >/dev/null 2>&1; then
+		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row'), 'download', json('{\"route\":{\"route\":\"direct\"}}')));" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
 			return 1
 		fi
@@ -528,6 +536,51 @@ geodata_configured_url() {
 # 把一个地址列表写成核心存的那个 JSON 数组。
 geodata_urls_json() {
 	awk 'BEGIN { printf "["; first = 1 } NF { if (!first) printf ","; printf "\"%s\"", $0; first = 0 } END { printf "]" }'
+}
+
+# 库里留着的清单换成它那个来源现在的镜像组（CDN 在前）。来源不变（面板的下拉还
+# 得认得出），换的只是镜像的顺序与地址。清单里的地址认不出来（用户自己在面板里
+# 填的）就原样留着。
+geodata_refreshed_urls_json() {
+	db=$1
+	first_geosite=$(sqlite3 "$db" "SELECT json_extract(record, '\$.urls[0].urls[0]') FROM geodata_settings WHERE id=1;" 2>/dev/null)
+	first_geoip=$(sqlite3 "$db" "SELECT json_extract(record, '\$.urls[1].urls[0]') FROM geodata_settings WHERE id=1;" 2>/dev/null)
+	stored_geosite=$(sqlite3 "$db" "SELECT json_extract(record, '\$.urls[0].urls') FROM geodata_settings WHERE id=1;" 2>/dev/null)
+	stored_geoip=$(sqlite3 "$db" "SELECT json_extract(record, '\$.urls[1].urls') FROM geodata_settings WHERE id=1;" 2>/dev/null)
+	geosite_group=$(geodata_group_of_list "$db" 0 geosite "$first_geosite")
+	geoip_group=$(geodata_group_of_list "$db" 1 geoip "$first_geoip")
+	# 那个来源的地址一行一个，写成核心存的那个数组（一行一个地址不能直接进 JSON）。
+	[ -n "$geosite_group" ] && geosite_group=$(printf '%s\n' "$geosite_group" | geodata_urls_json)
+	[ -n "$geoip_group" ] && geoip_group=$(printf '%s\n' "$geoip_group" | geodata_urls_json)
+	[ -n "$geosite_group" ] || geosite_group="$stored_geosite"
+	[ -n "$geoip_group" ] || geoip_group="$stored_geoip"
+	[ -n "$geosite_group" ] && [ -n "$geoip_group" ] || return 0
+	printf '[{"urls":%s,"from_config":false},{"urls":%s,"from_config":false}]' "$geosite_group" "$geoip_group"
+}
+
+# 库里那份清单（geosite 是 0，geoip 是 1）是不是我们认识的那个来源的镜像组：是
+# 就把那个来源现在的镜像组打印出来，不是就什么都不打印（库里那份原样留着）。
+geodata_group_of_list() {
+	db=$1
+	index=$2
+	kind=$3
+	first=$4
+	[ -n "$first" ] || return 0
+	entry=$(honk_geodata_source_of "$first" 2>/dev/null) || return 0
+	src=${entry%% *}
+	# 清单里的每个地址都得是同一个来源，才算我们的镜像组。
+	others=$(sqlite3 "$db" "SELECT j.value FROM json_each((SELECT record FROM geodata_settings WHERE id=1), '\$.urls') t, json_each(t.value, '\$.urls') j WHERE t.key = $index;" 2>/dev/null)
+	[ -n "$others" ] || return 0
+	for u in $others; do
+		e=$(honk_geodata_source_of "$u" 2>/dev/null) || return 0
+		[ "${e%% *}" = "$src" ] || return 0
+	done
+	case "$src" in
+	metacubex) honk_geodata_metacubex_sources "$kind" ;;
+	metacubex-lite) honk_geodata_lite_sources "$kind" ;;
+	loyalsoldier) honk_geodata_loyal_sources "$kind" ;;
+	*) return 0 ;;
+	esac
 }
 
 preflight() {
