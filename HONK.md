@@ -267,6 +267,11 @@ SQLite 的 WAL 模式**：建管理员时记录先写进 `honk.db-wal`，要等 
 3. **地理数据那一层原样保留**：`geodata.sh` 与 `control.sh` 里的地理数据段（下载源清单
    写在状态库、CDN 优先、出口默认直连、启动时的清库与补文件）是我们自己的，上游没有。
 
+维护页的「恢复配置」现在把随包那份 `config.dae` **原样**恢复回去（上游怎么写的就怎么
+恢复，不渲染运行字段、不改本机直连区块）。原因是首次引导只在配置与随包模板一致时才放行，
+恢复出来的必须就是那份文件；运行字段由首次引导自己填，用户重新配置即可。其余配置不留
+（重置本来就换掉整个 `/etc/honk`，旧状态库由上游归档到 `/etc/honk-pre-reset`）。
+
 上游那套「settings/repair 直接改写 system.dae」的老流程随单配置模型一起没了：`write_runtime_system`、
 `restore_system`、`restore_old_runtime`、`ensure_loopback_system`、`main_has_system_include`、
 `clash_system_matches` 这几个函数已经没有调用点，一并去掉。

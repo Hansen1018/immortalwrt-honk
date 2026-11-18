@@ -1095,11 +1095,6 @@ reset_verify_target() {
 		awk '{ print $4 }' | cut -d/ -f1 | grep -qxF "$reset_target_ip"
 }
 
-render_reset_config() {
-	sed -e "s#^    lan_interface: br-lan\$#    lan_interface: $3#" \
-		-e "s#^        listen: '127\.0\.0\.1:9527'\$#        listen: '$4:$5'#" \
-		"$1" > "$2"
-}
 
 reset_data() {
 	reset_target_device=$1
@@ -1124,14 +1119,10 @@ reset_data() {
 	mkdir -p "$reset_stage/etc/honk" "$reset_uci" || { error temporary_storage_unavailable; return 1; }
 	[ -f /usr/share/honk/default-config.dae ] && [ ! -L /usr/share/honk/default-config.dae ] || { error default_config_unavailable; return 1; }
 	reset_verify_target || { error lan_target_unavailable; return 1; }
-	render_reset_config /usr/share/honk/default-config.dae "$reset_stage/etc/honk/config.dae" "$reset_target_device" "$reset_target_ip" 9527 || { error reset_stage_failed; return 1; }
-	grep -q "^    lan_interface: $reset_target_device$" "$reset_stage/etc/honk/config.dae" || { error reset_stage_failed; return 1; }
-	grep -q "^        listen: '$reset_target_ip:9527'$" "$reset_stage/etc/honk/config.dae" || { error reset_stage_failed; return 1; }
-	reset_wan_device=
-	. /lib/functions/network.sh 2>/dev/null || :
-	network_get_device reset_wan_device wan 2>/dev/null || reset_wan_device=
-	case "$reset_wan_device" in ''|*[!A-Za-z0-9_.:-]*) reset_wan_device= ;; esac
-	"$CONTROL" local-direct-file "$reset_stage/etc/honk/config.dae" "$reset_target_device" "$reset_wan_device" || { error local_direct_render_failed; return 1; }
+	# 完整恢复随包那份 config.dae：原样复制，不渲染运行字段、也不动本机直连区块 ——
+	# 恢复出来的就是上游写的那个文件（首次引导只在配置与随包模板一致时才放行，
+	# 运行字段由它自己填），其余配置不留，用户重新配置即可。
+	cp -p /usr/share/honk/default-config.dae "$reset_stage/etc/honk/config.dae" || { error reset_stage_failed; return 1; }
 	chmod 0600 "$reset_stage/etc/honk/config.dae" || { error reset_stage_failed; return 1; }
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" import honk < "$temp_dir/old-uci" || { error reset_profile_stage_failed; return 1; }
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" set honk.main.enabled=0 || { error reset_profile_stage_failed; return 1; }
