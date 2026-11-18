@@ -238,6 +238,39 @@ SQLite 的 WAL 模式**：建管理员时记录先写进 `honk.db-wal`，要等 
 还在用旧的 JS。升级后**强制刷新一次页面**（Ctrl+F5，或清理浏览器缓存）即可；
 不想刷新就用上面的命令行入口。
 
+## 上游 v2026.11.18.1：单配置模型与我们的取舍
+
+上游（`kenzok8/openwrt-honk`）在 v2026.11.18.1 换掉了「config.dae + system.dae」两个
+文件的布局：`config.dae` 现在是完整配置（global、experimental、group、dns、routing），
+`system.dae` 只是一个不再被引用的兼容文件。同一版还带来：
+
+- `honk.main.system_managed`：为 0 时面板一处都不改配置（用户自己拥有它），设置页在自管
+  时隐藏表单，给出编辑器与「切回」入口；
+- 升级时把升级前的 `config.dae` 与 `system.dae` 存进 `/etc/.honk-preupgrade`，装好后写回
+  （新增的 `preupgrade-restore.sh` 与包的 preinst/postinst 钩子）；
+- 启动前置检查用 `sqlite3 quick_check` 探状态库，坏了就报 `state_database_corrupt`，让人
+  到维护页重置（旧库在重置前归档到 `/etc/honk-pre-reset`）；
+- 「修复」按钮不再改写配置，只做校验；设置只写 UCI，配置由面板的 write-system 与
+  panel-managed 两个事务来改；
+- LuCI 侧删掉了 settings.js（设置并进概览页），菜单里的「设置」变成指向概览页的隐藏
+  别名。
+
+我们跟着上游取了这些改动，但有三处按本树的情况改了回来：
+
+1. **存储模式仍是 db**：Doona 面板的「导入」与「修订历史」要 `--store db`（见上面两节）。
+   核心拒绝 db 存储模式与 Clash API 同时开（`experimental.clash_api.external_controller is
+   set; --store db runs without the Clash API`），会直接退出。所以默认配置模板里不写
+   `clash_api` 段，`control.sh` 的 `render_runtime_system` 也只在 file 模式下写它。
+2. **`bootstrap_resolver` 仍用路由器自己的 dnsmasq**（上游的模板改成了 1.1.1.1）：订阅的
+   `route: direct` 抓取走这个解析器，解析出答案就不再回落到系统解析器，换成公网 DNS
+   等于替所有订阅换了 DNS，被污染或劫持的域名会解析到错的地址，订阅就再也拉不到数据。
+3. **地理数据那一层原样保留**：`geodata.sh` 与 `control.sh` 里的地理数据段（下载源清单
+   写在状态库、CDN 优先、出口默认直连、启动时的清库与补文件）是我们自己的，上游没有。
+
+上游那套「settings/repair 直接改写 system.dae」的老流程随单配置模型一起没了：`write_runtime_system`、
+`restore_system`、`restore_old_runtime`、`ensure_loopback_system`、`main_has_system_include`、
+`clash_system_matches` 这几个函数已经没有调用点，一并去掉。
+
 ## 地理数据：文件在哪、源在哪、为什么以前更新不了
 
 **文件放在数据目录里**（`/etc/honk/geosite.dat`、`/etc/honk/geoip.dat`），不是软件包

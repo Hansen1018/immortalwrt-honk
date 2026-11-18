@@ -1,5 +1,49 @@
-include {
-    system.dae
+global {
+    wan_interface: auto
+    lan_interface: br-lan
+    log_level: info
+    dial_mode: domain
+    allow_insecure: false
+    auto_config_kernel_parameter: true
+    data_dir: '/etc/honk'
+    # 默认只走 logread，由面板日志页读取。需要跨重启排障时再指定持久路径。
+    log_file: ''
+    # 节点健康检查目标：经节点访问，用国外可达的地址，避免误判。
+    tcp_check_url: 'https://www.gstatic.com/generate_204'
+    tcp_check_http_method: HEAD
+    udp_check_dns: dns.google.com:53, 8.8.8.8
+    check_interval: 300s
+    # DNS 上游写域名时用它自举；写死 IP 时不会用到。
+    # 用路由器自己的解析器（dnsmasq），不用公网上的 DNS：订阅的 route: direct
+    # 抓取也走它，答案一旦解析出来就不再回落到系统解析器（只有失败或空结果才
+    # 回落）。换成公网 DNS 等于替订阅换了 DNS，被污染或劫持的域名会解析到错的
+    # 地址，订阅就再也拉不到数据（实测：配了公网 resolver 后订阅 status 变成
+    # stale、节点为 0，去掉就正常）。本机的解析器永远可达，答案与系统解析器一致。
+    bootstrap_resolver: '127.0.0.1:53'
+    store_subscribe: true
+    nfqueue_enable: true
+}
+
+experimental {
+    native_api {
+        enabled: true
+        listen: '127.0.0.1:9527'
+        password_auth: true
+        allow_anonymous_loopback: false
+        config_write: true
+        ui: '/usr/share/doona'
+    }
+
+    # 这里不写 clash_api：本树用 --store db 启动核心（Doona 面板的「导入」与
+    # 「修订历史」要它），而核心拒绝 db 存储模式与 Clash API 同时开：
+    # "experimental.clash_api.external_controller is set; --store db runs
+    # without the Clash API" —— 核心会直接退出。要用 Clash API 就把存储模式
+    # 切成 file。
+
+    # 缓存解析结果与订阅，重启后首包更快。
+    cache_file {
+        enabled: true
+    }
 }
 
 group {
@@ -33,6 +77,8 @@ dns {
 
 routing {
     dip(224.0.0.0/3, 'ff00::/8') -> direct
+    # dnsmasq 用 127.0.0.1 源地址查上游，private 规则兜不住，单独放行。
+    pname(dnsmasq) && l4proto(udp) && dport(53) -> direct(must)
     # 路由器自身地址直连，管理面板不被代理；服务启动时按本机地址重写下面区块
     # honk:local-direct-begin
     # honk:local-direct-end

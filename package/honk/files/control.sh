@@ -11,6 +11,7 @@ HONK_MAINT_CAP_FILE=$HONK_MAINT_DIR/capability
 . /lib/functions.sh
 . /usr/share/honk/lock.sh
 . /usr/share/honk/lifecycle.sh
+# 地理数据的清单与来源在 geodata.sh 里（上游的 control.sh 没有这部分）。
 . /usr/share/honk/geodata.sh
 
 fail() {
@@ -50,6 +51,11 @@ valid_network_name() {
 
 module_loaded() {
 	[ -d "/sys/module/$1" ] || grep -q "^$1 " /proc/modules
+}
+
+# check_config 从核心已解析配置缓存该值；缺少字段时不能猜测。
+nfqueue_enabled() {
+	[ "${runtime_nfqueue_enable:-}" = true ]
 }
 
 module_available() {
@@ -95,14 +101,21 @@ check_network() {
 	ubus call "network.interface.$lan_network" status >/dev/null 2>&1 || { fail "选择的 LAN 网络在 netifd 里不存在，请在服务设置里重新选择"; return 1; }
 }
 
-# 本机 LAN/WAN 设备地址（跳过链路本地），与 honk 的 local_direct_cidrs 对齐
+# 按设备取本机地址（IPv4+IPv6），跳过链路本地；不依赖 UCI 网络名。
+# WAN 设备名，用于把本机公网地址也纳入直连；取不到就跳过。
+network_wan_device() {
+	. /lib/functions/network.sh 2>/dev/null || return 0
+	wan_dev=
+	network_get_device wan_dev wan 2>/dev/null || return 0
+	case "$wan_dev" in ''|*[!A-Za-z0-9_.:-]*) return 0 ;; esac
+	printf '%s\n' "$wan_dev"
+}
+
 local_direct_addresses() {
 	list=''
-	. /lib/functions/network.sh
-	for net in "$lan_network" wan; do
-		network_get_device dev "$net" || continue
-		case "$dev" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
-		for addr in $(ip -o addr show dev "$dev" 2>/dev/null | awk '/inet6? / { split($4, a, "/"); print a[1] }'); do
+	for dev in "$@"; do
+		case "$dev" in ''|*[!A-Za-z0-9_.:-]*) continue ;; esac
+		for addr in $(ip -o addr show dev "$dev" 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1); do
 			case "$addr" in fe80:*|169.254.*) continue ;; esac
 			case "$addr" in ''|*[!0-9a-fA-F:.]*) continue ;; esac
 			[ "${#addr}" -le 45 ] || continue
@@ -113,42 +126,60 @@ local_direct_addresses() {
 	printf '%s\n' "$list"
 }
 
-# 把标记区块换成当前本机地址，honk 的 LAN self-protection 检查才认
+# 只在显式时机（首次引导、重置、合并预览）把本机地址写进标记区块；启动不调用。
 sync_local_direct() {
+	target=${1:-/etc/honk/config.dae}
 	begin='    # honk:local-direct-begin'
 	end='    # honk:local-direct-end'
-	grep -qxF "$begin" /etc/honk/config.dae || return 0
-	grep -qxF "$end" /etc/honk/config.dae || return 0
-	ips=$(local_direct_addresses)
+	[ -f "$target" ] && [ ! -L "$target" ] || return 1
+	grep -qxF "$begin" "$target" || return 0
+	grep -qxF "$end" "$target" || return 0
+	shift
+	ips=$(local_direct_addresses "$@")
 	[ -n "$ips" ] && rule="    dip($ips) && !dport(53) -> direct(must)" || rule=''
-	# honk-core 只认 .dae 后缀，临时文件必须带它
-	temp=/etc/honk/.config.$$.dae
+	# honk-core 只认 .dae 后缀，临时文件必须与目标同目录
+	temp=$(dirname "$target")/.local-direct.$$.dae
 	( umask 077; : > "$temp" ) || return 1
 	awk -v begin="$begin" -v end="$end" -v rule="$rule" '
 		$0 == begin { print; if (rule != "") print rule; skip = 1; next }
 		skip && $0 == end { print; skip = 0; next }
 		skip { next }
 		{ print }
-	' /etc/honk/config.dae > "$temp" || { rm -f "$temp"; return 1; }
-	cmp -s "$temp" /etc/honk/config.dae && { rm -f "$temp"; return 0; }
-	"$HONK_CORE" config validate --config "$temp" >/dev/null 2>&1 || { rm -f "$temp"; return 1; }
+	' "$target" > "$temp" || { rm -f "$temp"; return 1; }
+	cmp -s "$temp" "$target" && { rm -f "$temp"; return 0; }
 	chmod 0600 "$temp"
-	mv -f "$temp" /etc/honk/config.dae || { rm -f "$temp"; return 1; }
+	mv -f "$temp" "$target" || { rm -f "$temp"; return 1; }
 }
 
 check_config() {
+	runtime_nfqueue_enable=
+	runtime_native_api_enabled=
+	runtime_native_api_listen=
+	runtime_clash_api_listen=
+	config_error=
 	[ "$config_file" = /etc/honk/config.dae ] || { fail "配置路径必须为 /etc/honk/config.dae"; return 1; }
 	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { fail "/etc/honk/config.dae 不是普通文件（可能被替换成软链）"; return 1; }
-	"$HONK_CORE" config validate --config /etc/honk/config.dae >/dev/null || { fail "config.dae 未通过静态校验，请先修正配置"; return 1; }
+	# 状态库损坏时直接给可执行的提示，不要让核心抛 raw 错误。
+	state_db=/etc/honk/state/honk.db
+	if [ -f "$state_db" ] && [ ! -L "$state_db" ] && command -v sqlite3 >/dev/null 2>&1; then
+		state_check=$(sqlite3 "$state_db" 'PRAGMA quick_check;' 2>/dev/null) || state_check=failed
+		[ "$state_check" = ok ] || { config_error=state_database_corrupt; fail "状态数据库损坏，请到维护页执行重置"; return 1; }
+	fi
+	core_validation_result=$("$HONK_CORE" config validate --config /etc/honk/config.dae) || { fail "config.dae 未通过静态校验，请先修正配置"; return 1; }
+	runtime_nfqueue_enable=$(printf '%s\n' "$core_validation_result" | jsonfilter -e '@.runtime.nfqueue_enable' 2>/dev/null)
+	case "$runtime_nfqueue_enable" in
+		true|false) ;;
+		*) config_error=nfqueue_runtime_unavailable; fail "honk-core 无法报告解析后的 nfqueue_enable，请更新 Honk 核心"; return 1 ;;
+	esac
+	runtime_native_api_enabled=$(printf '%s\n' "$core_validation_result" | jsonfilter -e '@.runtime.native_api_enabled' 2>/dev/null)
+	runtime_native_api_listen=$(printf '%s\n' "$core_validation_result" | jsonfilter -e '@.runtime.native_api_listen' 2>/dev/null)
+	runtime_clash_api_listen=$(printf '%s\n' "$core_validation_result" | jsonfilter -e '@.runtime.clash_api_listen' 2>/dev/null)
+	config_error=
 	[ -r /usr/share/doona/index.html ] || { fail "缺少 Doona 静态文件（/usr/share/doona/index.html），请重新安装 luci-app-honk"; return 1; }
 	[ "$settings_owner" = system ] || return 0
 	[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || { fail "/etc/honk/system.dae 不是普通文件（可能被替换成软链）"; return 1; }
 	system_config_readonly || { fail "/etc/honk/system.dae 权限不对，应为 0600"; return 1; }
-	case "$listen_port" in
-		''|*[!0-9]*) fail "监听端口必须是数字"; return 1 ;;
-	esac
-	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || { fail "监听端口必须在 1024-65535 之间"; return 1; }
-	valid_clash_api || { fail "Clash API 设置不合法（端口 1024-65535，密钥 6-128 位）"; return 1; }
+
 }
 
 # 顺序同 honk-core：设了 HONK_VMLINUX_BTF 就只认它
@@ -183,16 +214,21 @@ check_kernel() {
 			fail "HONK_VMLINUX_BTF 指向的 $HONK_VMLINUX_BTF 不可读，honk-core 不会回退到默认路径"
 		else
 			kernel_error=kernel_btf_missing
-			fail "内核缺少 BTF（/sys/kernel/btf/vmlinux 或 /usr/lib/debug/boot/vmlinux），请安装 vmlinux-btf 或换用带 BTF 的固件"
+			fail "内核缺少 BTF（/sys/kernel/btf/vmlinux 或 /usr/lib/debug/boot/vmlinux），需装与 uname -r 同版本的 vmlinux-btf（https://github.com/kenzok8/vmlinux-btf/releases/tag/latest），或换用自带 BTF 的固件"
 		fi
 		return 1
 	fi
 	[ -d /sys/fs/bpf ] && grep -q ' /sys/fs/bpf bpf ' /proc/mounts || { kernel_error=bpffs_not_mounted; fail "bpffs 未挂载到 /sys/fs/bpf，请检查内核或手工挂载"; return 1; }
 	command -v ip >/dev/null 2>&1 || { kernel_error=ip_full_missing; fail "缺少 ip 命令（装 ip-full）"; return 1; }
 	command -v modprobe >/dev/null 2>&1 || { kernel_error=kmod_missing; fail "缺少 modprobe 命令（装 kmod）"; return 1; }
-	for module in sch_ingress cls_bpf veth nft_queue nfnetlink_queue; do
-		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth / kmod-nft-queue 已安装"; return 1; }
+	for module in sch_ingress cls_bpf veth; do
+		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth 已安装"; return 1; }
 	done
+	if nfqueue_enabled; then
+		for module in nft_queue nfnetlink_queue; do
+			module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，装 kmod-nft-queue，或在 global 里设 nfqueue_enable: false"; return 1; }
+		done
+	fi
 }
 
 check_conflicts() {
@@ -583,34 +619,41 @@ geodata_group_of_list() {
 	esac
 }
 
+
+check_runtime_ports() {
+	runtime_port_error=
+	if [ "$runtime_native_api_enabled" = true ]; then
+		runtime_port=$(printf '%s\n' "$runtime_native_api_listen" | awk -F: '{print $NF}')
+		case "$runtime_port" in ''|*[!0-9]*) runtime_port_error=invalid_package_config; return 1 ;; esac
+		check_port "$runtime_port" || { runtime_port_error=listen_port_occupied; return 1; }
+	fi
+	if [ -n "$runtime_clash_api_listen" ]; then
+		runtime_port=$(printf '%s\n' "$runtime_clash_api_listen" | awk -F: '{print $NF}')
+		case "$runtime_port" in ''|*[!0-9]*) runtime_port_error=invalid_package_config; return 1 ;; esac
+		check_port "$runtime_port" || { runtime_port_error=clash_api_port_occupied; return 1; }
+	fi
+}
+
 preflight() {
 	load_settings
 	[ "$enabled" = 1 ] && [ "$initialized" = 1 ] || { fail "请先在 LuCI 里启用并完成初始化"; return 1; }
-	# 只有 system.dae 负责这些字段时才检查 UCI 端口与网络；完整配置自行定义时不碰。
-	if [ "$settings_owner" = system ]; then
-		maintenance_start_guard && check_config && check_network && check_kernel && no_honk_resources && check_conflicts && check_port && {
-			[ "$clash_api_enabled" = 0 ] || check_port "$clash_api_port"
-		}
-		return $?
-	fi
-	maintenance_start_guard && check_config && check_kernel && no_honk_resources && check_conflicts
+	maintenance_start_guard && check_config && check_kernel && no_honk_resources && check_conflicts && check_runtime_ports
 }
 
 prepare_runtime() {
 	preflight || return 1
-	for module in sch_ingress cls_bpf veth nft_queue nfnetlink_queue; do
+	for module in sch_ingress cls_bpf veth; do
 		module_loaded "$module" || modprobe "$module" || { fail "无法加载内核模块 $module，请确认对应 kmod 包已安装"; return 1; }
 	done
+	if nfqueue_enabled; then
+		for module in nft_queue nfnetlink_queue; do
+			module_loaded "$module" || modprobe "$module" || { fail "无法加载内核模块 $module，请确认对应 kmod 包已安装"; return 1; }
+		done
+	fi
 	mkdir -p /etc/honk/state || { fail "无法创建状态目录（/etc/honk/state），请检查磁盘空间与权限"; return 1; }
 	chmod 0700 /etc/honk/state || return 1
-	geodata_files
 }
 
-# 地理数据放在数据目录里。软件包（v2ray-geodata）把文件装在只读分区里，
-# 核心更新时要原地替换加载着的那份 —— 写不进去，面板的「立即更新」就停在
-# 替换阶段。数据目录可写又是持久的，所以第一次启动时把软件包的那份复制过来。
-# 必须是真实文件：核心拒绝在符号链接旁边落盘（实测报的是替换失败）。
-# 复制不了（空间不够）就留着软件包的那份：核心照样能起，只是更新替换不了。
 geodata_files() {
 	for name in geosite geoip; do
 		target="/etc/honk/$name.dat"
@@ -631,6 +674,7 @@ geodata_files() {
 	done
 	return 0
 }
+
 
 valid_username() {
 	case "$1" in
@@ -675,59 +719,66 @@ network_settings() {
 	printf '%s\n' "$lan_ip" | awk -F. 'NF == 4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1; exit 0 } { exit 1 }' || return 1
 }
 
-ensure_loopback_system() {
-	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$current_hash" = "$system_written_hash" ] || { fail "初始化期间 system.dae 被其他进程改动，已中止"; return 1; }
-	current_listen=$(sed -n "s/^[[:space:]]*listen:[[:space:]]*'\([^']*\)'.*/\1/p" /etc/honk/system.dae | head -n 1)
-	[ "$current_listen" = "127.0.0.1:$listen_port" ] && return 0
-	temp_system=$(mktemp /etc/honk/.system.dae.XXXXXX) || return 1
-	sed "s/^[[:space:]]*listen:[[:space:]]*'[^']*'.*/        listen: '127.0.0.1:$listen_port'/" /etc/honk/system.dae > "$temp_system" || { rm -f "$temp_system"; return 1; }
-	chmod 0600 "$temp_system" || { rm -f "$temp_system"; return 1; }
-	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$current_hash" = "$system_written_hash" ] || { rm -f "$temp_system"; fail "初始化期间 system.dae 被其他进程改动，已中止"; return 1; }
-	mv -f "$temp_system" /etc/honk/system.dae || { rm -f "$temp_system"; return 1; }
-	system_written_hash=$(sha256sum /etc/honk/system.dae | awk '{print $1}')
+initialize_install_main() {
+	install_source=$1
+	install_target=$2
+	install_expected_hash=$3
+	install_dir=$(dirname "$install_target")
+	install_name=$(basename "$install_target")
+	[ -f "$install_source" ] && [ ! -L "$install_source" ] && [ -f "$install_target" ] && [ ! -L "$install_target" ] || { initialize_error=write_failed; return 1; }
+	install_temp=$(mktemp "$install_dir/.$install_name.XXXXXX") || { initialize_error=write_failed; return 1; }
+	cp -p "$install_source" "$install_temp" && chmod 0600 "$install_temp" || { rm -f "$install_temp"; initialize_error=write_failed; return 1; }
+	[ -f "$install_target" ] && [ ! -L "$install_target" ] || { rm -f "$install_temp"; initialize_error=main_changed; return 1; }
+	install_current_hash=$(sha256sum "$install_target" 2>/dev/null | awk '{print $1}')
+	[ "$install_current_hash" = "$install_expected_hash" ] || { rm -f "$install_temp"; initialize_error=main_changed; return 1; }
+	candidate_hash=$(sha256sum "$install_temp" | awk '{print $1}')
+	main_install_pending=1
+	mv -f "$install_temp" "$install_target" || { rm -f "$install_temp"; initialize_error=write_failed; return 1; }
+	main_install_pending=0
+	main_written=1
 }
 
-restore_system() {
-	[ -n "$system_written_hash" ] || return 0
-	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$current_hash" = "$system_written_hash" ] || { fail "回滚期间 system.dae 被其他进程改动，已中止"; return 1; }
-	[ "$current_hash" != "$original_system_hash" ] || { system_written_hash=""; return 0; }
-	if [ -z "$original_system_hash" ]; then
-		rm -f /etc/honk/system.dae || return 1
-		system_written_hash=""
-		return 0
-	fi
-	temp_restore=$(mktemp /etc/honk/.system.dae.restore.XXXXXX) || return 1
-	cp -p "$old_system" "$temp_restore" || { rm -f "$temp_restore"; return 1; }
-	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$current_hash" = "$system_written_hash" ] || { rm -f "$temp_restore"; fail "回滚期间 system.dae 被其他进程改动，已中止"; return 1; }
-	mv -f "$temp_restore" /etc/honk/system.dae || { rm -f "$temp_restore"; return 1; }
-	system_written_hash=""
+initialize_restore_main() {
+	_restore_target=$1
+	_restore_backup=$2
+	_restore_candidate_hash=$3
+	_restore_original_hash=$4
+	[ -f "$_restore_backup" ] && [ ! -L "$_restore_backup" ] && [ -f "$_restore_target" ] && [ ! -L "$_restore_target" ] || return 1
+	_restore_backup_hash=$(sha256sum "$_restore_backup" 2>/dev/null | awk '{print $1}')
+	[ "$_restore_backup_hash" = "$_restore_original_hash" ] || return 1
+	_restore_current_hash=$(sha256sum "$_restore_target" 2>/dev/null | awk '{print $1}')
+	[ "$_restore_current_hash" != "$_restore_original_hash" ] || return 0
+	[ "$_restore_current_hash" = "$_restore_candidate_hash" ] || return 1
+	_restore_dir=$(dirname "$_restore_target")
+	_restore_name=$(basename "$_restore_target")
+	_restore_temp=$(mktemp "$_restore_dir/.$_restore_name.restore.XXXXXX") || return 1
+	cp -p "$_restore_backup" "$_restore_temp" || { rm -f "$_restore_temp"; return 1; }
+	[ -f "$_restore_target" ] && [ ! -L "$_restore_target" ] || { rm -f "$_restore_temp"; return 1; }
+	_restore_current_hash=$(sha256sum "$_restore_target" 2>/dev/null | awk '{print $1}')
+	[ "$_restore_current_hash" = "$_restore_candidate_hash" ] || { rm -f "$_restore_temp"; return 1; }
+	mv -f "$_restore_temp" "$_restore_target" || { rm -f "$_restore_temp"; return 1; }
 }
 
 cleanup_initialize() {
 	if mock_stop >/dev/null 2>&1; then
-		if [ -n "$system_written_hash" ] && ! restore_system; then
-			logger -t honk "system config rollback refused or failed; inspect /etc/honk/system.dae"
+		retain_snapshot=0
+		if [ "${initialize_committed:-0}" != 1 ] && { [ "${main_written:-0}" = 1 ] || [ "${main_install_pending:-0}" = 1 ]; }; then
+			initialize_restore_main "${main_config_path:-/etc/honk/config.dae}" "$old_main" "$candidate_hash" "$original_main_hash" || retain_snapshot=1
+			if [ ! -f "$old_uci" ] || { ! uci import honk < "$old_uci" || ! uci commit honk || ! chmod 0600 /etc/config/honk; }; then
+				retain_snapshot=1
+			fi
 		fi
-		rm -rf "$temp_dir"
+		if [ "$retain_snapshot" = 1 ]; then
+			logger -t honk "initialization rollback incomplete; snapshot retained at $temp_dir"
+		else
+			rm -rf "$temp_dir"
+		fi
 		honk_lock_release >/dev/null 2>&1
 	else
 		logger -t honk "mock process cleanup failed; keeping operation lock and temporary files"
 	fi
 }
 
-# 迁移：删掉旧版本写进 system.dae 的 assets.geodata 段。
-#
-# 旧版本在 system.dae 里写死了地理数据的下载源：一个 GitHub 地址 +
-# route: direct。这段配置会覆盖核心自己的内置列表（每个文件两个地址，
-# 一个不通就换下一个），于是只剩一个地址可试：不通就是下载超时。
-# route: direct 还绕过了路由规则，出口不由用户决定。
-#
-# 现在配置里不写这一段：核心用内置的列表，路由规则决定出口。旧文件里
-# 的这段只在它确实是我们写的那份时才删 —— 用户自己改过的配置不动。
 migrate_geodata_assets() {
 	[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || { echo unchanged; return 0; }
 	# 只删我们自己写的那份：用户自己改过的配置不动。
@@ -752,37 +803,33 @@ migrate_geodata_assets() {
 	return 0
 }
 
+
 # 交还面板管理时也用它，保证两条路径生成的 system.dae 一致。
 render_runtime_system() {
+	_nfq=$(sed -n 's/^    nfqueue_enable: \(true\|false\)$/\1/p' /etc/honk/system.dae 2>/dev/null | head -n 1)
+	case "$_nfq" in true|false) ;; *) _nfq=true ;; esac
 	printf "global {\n    wan_interface: auto\n    lan_interface: '%s'\n" "$1"
 	printf "    log_level: info\n    dial_mode: domain\n    allow_insecure: false\n"
 	printf "    auto_config_kernel_parameter: true\n    data_dir: '/etc/honk'\n"
-	printf "    bootstrap_resolver: '127.0.0.1:53'\n"
-	printf "    store_subscribe: true\n    nfqueue_enable: true\n}\n\n"
+	printf "    store_subscribe: true\n    nfqueue_enable: %s\n}\n\n" "$_nfq"
 	printf "experimental {\n    native_api {\n        enabled: true\n        listen: '%s:%s'\n" "$2" "$3"
 	printf "        password_auth: true\n        allow_anonymous_loopback: false\n"
 	printf "        config_write: true\n        ui: '/usr/share/doona'\n    }\n"
-	if [ "$clash_api_enabled" = 1 ]; then
+	# db 存储模式下核心不带 Clash API（--store db 与 clash_api 互斥，核心会直接
+	# 退出：experimental.clash_api.external_controller is set; --store db runs
+	# without the Clash API），所以这一段只在 file 模式下写。
+	_clash_store=db
+	config_get _clash_store main store db
+	if [ "$clash_api_enabled" = 1 ] && [ "$_clash_store" != db ]; then
 		printf "    clash_api {\n        external_controller: '%s:%s'\n        external_ui: '/usr/share/honk/zashboard'\n        secret: '%s'\n        default_mode: Rule\n    }\n" "$2" "$clash_api_port" "$clash_api_secret"
 	fi
 	printf "}\n"
 }
 
-write_runtime_system() {
-	lan_device=$1
-	lan_ip=$2
-	system_port=${3:-$listen_port}
-	system_listen=${4:-$lan_ip}
-	valid_clash_api || { fail "Clash API 设置不合法（端口 1024-65535，密钥 6-128 位）"; return 1; }
-	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$current_hash" = "$system_written_hash" ] || { fail "写入运行配置时 system.dae 被其他进程改动，已中止"; return 1; }
-	temp_system=$(mktemp /etc/honk/.system.dae.XXXXXX) || return 1
-	render_runtime_system "$lan_device" "$system_listen" "$system_port" > "$temp_system" || { rm -f "$temp_system"; return 1; }
-	chmod 0600 "$temp_system" || { rm -f "$temp_system"; return 1; }
-	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$current_hash" = "$system_written_hash" ] || { rm -f "$temp_system"; fail "写入运行配置时 system.dae 被其他进程改动，已中止"; return 1; }
-	mv -f "$temp_system" /etc/honk/system.dae || { rm -f "$temp_system"; return 1; }
-	system_written_hash=$(sha256sum /etc/honk/system.dae | awk '{print $1}')
+# 自管模式下 system.dae 归用户，面板一处都不改。
+system_is_managed() {
+	_managed=$(uci -q get honk.main.system_managed)
+	[ -z "$_managed" ] || [ "$_managed" = 1 ]
 }
 
 managed_core_pid() {
@@ -805,31 +852,34 @@ sync_boot_link() {
 	fi
 }
 
-restore_old_runtime() {
-	[ "$old_running" = 1 ] || return 0
-	runtime_enabled=$(uci -q get honk.main.enabled || echo 0)
-	if [ "$runtime_enabled" != 1 ]; then uci set honk.main.enabled=1 && uci commit honk || return 1; fi
-	honk_lifecycle_start 30 || {
-		[ "$runtime_enabled" = 1 ] || { uci set "honk.main.enabled=$runtime_enabled" && uci commit honk; }
-		return 1
-	}
-	if [ "$runtime_enabled" != 1 ]; then uci set "honk.main.enabled=$runtime_enabled" && uci commit honk || return 1; fi
+settings_rollback() {
+	uci import honk < "$old_uci" && uci commit honk || return 1
+	sync_boot_link "$old_boot_enabled"
 }
 
-settings_rollback() {
-	rollback_ok=1
-	honk_lifecycle_stop 30 || return 1
-	if [ -n "$system_written_hash" ] && ! restore_system; then rollback_ok=0; fi
-	if ! uci import honk < "$old_uci" || ! uci commit honk; then rollback_ok=0; fi
-	if ! sync_boot_link "$old_boot_enabled"; then rollback_ok=0; fi
-	restore_old_runtime || rollback_ok=0
-	[ "$rollback_ok" = 1 ]
+# Return 0 when pre-init runtime intent needs checks, 1 for flag-only, 2 for a forbidden live edit.
+settings_runtime_plan() {
+	runtime_settings_changed=0
+	[ "$new_network" = "$lan_network" ] && [ "$new_port" = "$listen_port" ] && \
+		[ "$new_clash_enabled" = "$clash_api_enabled" ] && [ "$new_clash_port" = "$clash_api_port" ] && \
+		[ "$new_clash_secret" = "$clash_api_secret" ] || runtime_settings_changed=1
+	if [ "$initialized" = 1 ]; then
+		[ "$runtime_settings_changed" = 0 ] || return 2
+		return 1
+	fi
+	[ "${runtime_fields_provided:-0}" = 1 ] || return 1
+	return 0
+}
+
+settings_network_preflight() {
+	[ "$runtime_checks" = 1 ] || return 0
+	check_network || { settings_network_error=lan_network_unavailable; return 1; }
+	network_settings || { settings_network_error=lan_ipv4_unavailable; return 1; }
 }
 
 settings() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
 	load_settings
-	[ "$settings_owner" = system ] || { echo '{"ok":false,"message":"config_settings_owned_by_file"}'; return 1; }
 	. /usr/share/libubox/jshn.sh || { echo '{"ok":false,"message":"jshn_unavailable"}'; return 1; }
 	# Bound stdin to 64KiB (DoS protection); read one extra byte to detect truncation.
 	settings_json=$(head -c 65537)
@@ -851,26 +901,42 @@ settings() {
 	json_get_type clash_secret_type clash_api_secret
 	json_get_var new_store store
 	json_get_type store_type store
-	[ "$network_type" = string ] || { echo '{"ok":false,"message":"invalid_lan_network"}'; return 1; }
-	case "$port_type" in int|integer) ;; *) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
 	# boot_enabled 已内置（恒为 1），前端不再提交，缺省就按当前值处理
 	case "$boot_enabled_type" in ''|null|boolean) ;; *) echo '{"ok":false,"message":"invalid_boolean_settings"}'; return 1 ;; esac
 	case "$clash_enabled_type" in ''|null|boolean) ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
 	case "$clash_port_type" in ''|null|int|integer) ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
 	case "$clash_secret_type" in ''|null|string) ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
-	case "$new_network" in ''|*[!A-Za-z0-9_.-]*) echo '{"ok":false,"message":"invalid_lan_network"}'; return 1 ;; esac
-	case "$new_port" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
-	[ "$new_port" -ge 1024 ] && [ "$new_port" -le 65535 ] || { echo '{"ok":false,"message":"invalid_listen_port"}'; return 1; }
 	load_settings
-	# 存储模式：db 才有配置导入与修订历史；file 只认配置文件。
-	config_get store_mode main store db
-	case "$store_type" in ''|null) new_store=$store_mode ;; esac
-	case "$new_store" in db|file) ;; *) echo '{"ok":false,"message":"invalid_store_mode"}'; return 1 ;; esac
+	runtime_fields_provided=0
+	case "$network_type" in
+		''|null) new_network=$lan_network ;;
+		string) runtime_fields_provided=1 ;;
+		*) echo '{"ok":false,"message":"invalid_lan_network"}'; return 1 ;;
+	esac
+	case "$port_type" in
+		''|null) new_port=$listen_port ;;
+		int|integer) runtime_fields_provided=1 ;;
+		*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;;
+	esac
 	case "$boot_enabled_type" in ''|null) new_boot_enabled=1 ;; esac
 	new_boot_enabled=1
-	case "$clash_enabled_type" in ''|null) new_clash_enabled=$clash_api_enabled ;; esac
-	case "$clash_port_type" in ''|null) new_clash_port=$clash_api_port ;; esac
+	case "$clash_enabled_type" in ''|null) new_clash_enabled=$clash_api_enabled ;; boolean) runtime_fields_provided=1 ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
+	case "$clash_port_type" in ''|null) new_clash_port=$clash_api_port ;; int|integer) runtime_fields_provided=1 ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
+	case "$clash_secret_type" in ''|null) new_clash_secret=$clash_api_secret ;; string) runtime_fields_provided=1 ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
 	[ -n "$new_clash_secret" ] || new_clash_secret=$clash_api_secret
+	settings_runtime_plan
+	settings_plan=$?
+	if [ "$settings_plan" = 2 ]; then
+		echo '{"ok":false,"message":"runtime_settings_owned_by_file"}'
+		return 1
+	fi
+	runtime_checks=0
+	[ "$settings_plan" = 1 ] || runtime_checks=1
+	if [ "$runtime_checks" = 1 ]; then
+		case "$new_network" in ''|*[!A-Za-z0-9_.-]*) echo '{"ok":false,"message":"invalid_lan_network"}'; return 1 ;; esac
+		case "$new_port" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
+		[ "$new_port" -ge 1024 ] && [ "$new_port" -le 65535 ] || { echo '{"ok":false,"message":"invalid_listen_port"}'; return 1; }
+	fi
 	new_enabled=$enabled
 	old_network=$lan_network
 	old_port=$listen_port
@@ -881,25 +947,28 @@ settings() {
 	old_clash_port=$clash_api_port
 	old_clash_secret=$clash_api_secret
 	[ "$initialized" = 1 ] || { [ "$new_enabled" = 0 ] || { echo '{"ok":false,"message":"initialize_before_enabling_service"}'; return 1; }; }
-	lan_network=$new_network
-	listen_port=$new_port
-	clash_api_enabled=$new_clash_enabled
-	clash_api_port=$new_clash_port
-	clash_api_secret=$new_clash_secret
-	valid_clash_api || { echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1; }
-	check_network || { echo '{"ok":false,"message":"lan_network_unavailable"}'; return 1; }
-	network_settings || { echo '{"ok":false,"message":"lan_ipv4_unavailable"}'; return 1; }
-	old_running=0
-	if managed_core_pid >/dev/null 2>&1; then
-		old_running=1
-	elif pidof honk-core >/dev/null 2>&1; then
-		echo '{"ok":false,"message":"unmanaged_core_running"}'
-		return 1
+	if [ "$runtime_checks" = 1 ]; then
+		lan_network=$new_network
+		listen_port=$new_port
+		clash_api_enabled=$new_clash_enabled
+		clash_api_port=$new_clash_port
+		clash_api_secret=$new_clash_secret
+		valid_clash_api || { echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1; }
+		settings_network_preflight || { echo "{\"ok\":false,\"message\":\"$settings_network_error\"}"; return 1; }
 	fi
-	if ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$new_port" ]; }; then
+	old_running=0
+	if [ "$runtime_checks" = 1 ]; then
+		if managed_core_pid >/dev/null 2>&1; then
+			old_running=1
+		elif pidof honk-core >/dev/null 2>&1; then
+			echo '{"ok":false,"message":"unmanaged_core_running"}'
+			return 1
+		fi
+	fi
+	if [ "$runtime_checks" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$new_port" ]; }; then
 		check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
 	fi
-	if [ "$clash_api_enabled" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_clash_port)" = "$new_clash_port" ]; }; then
+	if [ "$runtime_checks" = 1 ] && [ "$clash_api_enabled" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_clash_port)" = "$new_clash_port" ]; }; then
 		check_port "$new_clash_port" || { echo '{"ok":false,"message":"clash_api_port_occupied"}'; return 1; }
 	fi
 	honk_lock_acquire || { echo '{"ok":false,"message":"operation_in_progress"}'; return 1; }
@@ -907,46 +976,28 @@ settings() {
 	load_settings
 	[ "$lan_network" = "$old_network" ] && [ "$listen_port" = "$old_port" ] && [ "$enabled" = "$old_enabled" ] && [ "$boot_enabled" = "$old_boot_enabled" ] && [ "$initialized" = "$old_initialized" ] && [ "$clash_api_enabled" = "$old_clash_enabled" ] && [ "$clash_api_port" = "$old_clash_port" ] && [ "$clash_api_secret" = "$old_clash_secret" ] || { echo '{"ok":false,"message":"settings_changed_concurrently"}'; return 1; }
 	new_enabled=$enabled
-	managed_core_pid >/dev/null 2>&1 && recheck_running=1 || recheck_running=0
-	[ "$recheck_running" = "$old_running" ] || { echo '{"ok":false,"message":"service_state_changed_concurrently"}'; return 1; }
-	old_running=$recheck_running
-	lan_network=$new_network
-	listen_port=$new_port
-	clash_api_enabled=$new_clash_enabled
-	clash_api_port=$new_clash_port
-	clash_api_secret=$new_clash_secret
-	check_network && network_settings || { echo '{"ok":false,"message":"lan_network_changed_during_settings"}'; return 1; }
-	if ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$new_port" ]; }; then
+	if [ "$runtime_checks" = 1 ]; then
+		managed_core_pid >/dev/null 2>&1 && recheck_running=1 || recheck_running=0
+		[ "$recheck_running" = "$old_running" ] || { echo '{"ok":false,"message":"service_state_changed_concurrently"}'; return 1; }
+		old_running=$recheck_running
+		lan_network=$new_network
+		listen_port=$new_port
+		clash_api_enabled=$new_clash_enabled
+		clash_api_port=$new_clash_port
+		clash_api_secret=$new_clash_secret
+		settings_network_preflight || { echo '{"ok":false,"message":"lan_network_changed_during_settings"}'; return 1; }
+	fi
+	if [ "$runtime_checks" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$new_port" ]; }; then
 		check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
 	fi
-	if [ "$clash_api_enabled" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_clash_port)" = "$new_clash_port" ]; }; then
+	if [ "$runtime_checks" = 1 ] && [ "$clash_api_enabled" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_clash_port)" = "$new_clash_port" ]; }; then
 		check_port "$new_clash_port" || { echo '{"ok":false,"message":"clash_api_port_occupied"}'; return 1; }
 	fi
-	if [ "$initialized" = 1 ] && ! check_config; then echo '{"ok":false,"message":"package_config_unavailable"}'; return 1; fi
+	# This RPC stores configuration intent and boot policy; it never changes live service state.
 	umask 077
 	settings_dir=$(mktemp -d /tmp/honk-settings.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
 	old_uci=$settings_dir/honk.uci
 	uci export honk > "$old_uci" || { rm -rf "$settings_dir"; echo '{"ok":false,"message":"uci_snapshot_failed"}'; return 1; }
-	old_system=$settings_dir/system.dae
-	system_written_hash=""
-	if [ "$initialized" = 1 ]; then
-		[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || { rm -rf "$settings_dir"; echo '{"ok":false,"message":"system_config_unavailable"}'; return 1; }
-		cp -p /etc/honk/system.dae "$old_system" || { rm -rf "$settings_dir"; echo '{"ok":false,"message":"system_snapshot_failed"}'; return 1; }
-		original_system_hash=$(sha256sum "$old_system" | awk '{print $1}')
-		system_written_hash=$original_system_hash
-	fi
-	if [ "$old_running" = 1 ]; then
-		honk_lifecycle_stop 30 || {
-			settings_rollback; rollback_status=$?
-			if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"service_stop_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"service_stop_and_rollback_failed_snapshot_retained"}'; fi
-			return 1
-		}
-	fi
-	if [ "$initialized" = 1 ] && ! write_runtime_system "$lan_device" "$lan_ip" "$new_port"; then
-		settings_rollback; rollback_status=$?
-		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"system_config_write_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"system_config_write_and_rollback_failed_snapshot_retained"}'; fi
-		return 1
-	fi
 	uci set "honk.main.lan_network=$new_network" && uci set "honk.main.listen_port=$new_port" && uci set "honk.main.store=$new_store" && uci set "honk.main.enabled=$new_enabled" && uci set "honk.main.boot_enabled=$new_boot_enabled" && uci set "honk.main.clash_api_enabled=$new_clash_enabled" && uci set "honk.main.clash_api_port=$new_clash_port" && uci set "honk.main.clash_api_secret=$new_clash_secret" && uci commit honk && chmod 0600 /etc/config/honk || {
 		settings_rollback; rollback_status=$?
 		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"settings_commit_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"settings_commit_and_rollback_failed_snapshot_retained"}'; fi
@@ -957,20 +1008,6 @@ settings() {
 		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"boot_link_update_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"boot_link_update_and_rollback_failed_snapshot_retained"}'; fi
 		return 1
 	fi
-	if [ "$initialized" = 1 ]; then
-		service_ok=0
-		if [ "$new_enabled" = 1 ]; then
-			honk_lifecycle_start 30 || service_ok=1
-		else
-			honk_lifecycle_stop 30 || service_ok=1
-		fi
-		if [ "$service_ok" != 0 ]; then
-			settings_rollback; rollback_status=$?
-			if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"service_apply_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"service_apply_and_rollback_failed_snapshot_retained"}'; fi
-			return 1
-		fi
-	fi
-	system_written_hash=""
 	rm -rf "$settings_dir"
 	echo '{"ok":true,"message":"settings_saved"}'
 }
@@ -1103,6 +1140,8 @@ detach_rollback() {
 # 把文件里的 global/experimental 交还 system.dae 管理；dry_run 只返回会变动的项。
 detach() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then detach_fail update_recovery_required; return 1; fi
+	detach_fail configuration_page_merge_preview_required
+	return 1
 	. /usr/share/libubox/jshn.sh || { detach_fail jshn_unavailable; return 1; }
 	detach_request=$(head -c 4096)
 	dry_run=
@@ -1208,26 +1247,13 @@ diagnose() {
 	load_settings
 	errors=""
 	managed_core_pid >/dev/null 2>&1 && running=1 || running=0
-	check_config >/dev/null 2>&1 || errors="$errors invalid_package_config"
+	check_config >/dev/null 2>&1 || errors="$errors ${config_error:-invalid_package_config}"
 	# 内核检查自报具体缺哪项，面板才能给出可操作的提示
 	check_kernel >/dev/null 2>&1 || errors="$errors ${kernel_error:-kernel_requirements_unmet}"
-	if [ "$settings_owner" != system ]; then
-		if [ "$running" != 1 ]; then
-			no_honk_resources >/dev/null 2>&1 || errors="$errors honk_resources_occupied"
-			pidof honk-core >/dev/null 2>&1 && errors="$errors unmanaged_core_running"
-		fi
-	else
-		check_network >/dev/null 2>&1 || errors="$errors lan_network_unavailable"
-		network_settings >/dev/null 2>&1 || errors="$errors lan_ipv4_unavailable"
-		command -v curl >/dev/null 2>&1 || errors="$errors curl_missing"
-		if [ "$running" != 1 ]; then
-			no_honk_resources >/dev/null 2>&1 || errors="$errors honk_resources_occupied"
-			pidof honk-core >/dev/null 2>&1 && errors="$errors unmanaged_core_running"
-			check_port >/dev/null 2>&1 || errors="$errors listen_port_occupied"
-			if [ "$clash_api_enabled" = 1 ]; then
-				check_port "$clash_api_port" >/dev/null 2>&1 || errors="$errors clash_api_port_occupied"
-			fi
-		fi
+	if [ "$running" != 1 ]; then
+		no_honk_resources >/dev/null 2>&1 || errors="$errors honk_resources_occupied"
+		pidof honk-core >/dev/null 2>&1 && errors="$errors unmanaged_core_running"
+		check_runtime_ports >/dev/null 2>&1 || errors="$errors $runtime_port_error"
 	fi
 	check_conflicts >/dev/null 2>&1 || errors="$errors proxy_conflict"
 	if [ -d "$HONK_LOCK_DIR" ]; then
@@ -1245,141 +1271,12 @@ diagnose() {
 	return 0
 }
 
-main_has_system_include() {
-	awk '
-		/^[[:space:]]*include[[:space:]]*\{/ { inside = 1 }
-		inside && /(^|[^[:alnum:]_.-])system\.dae([^[:alnum:]_.-]|$)/ { found = 1 }
-		inside && /\}/ { inside = 0 }
-		END { exit !found }
-	' /etc/honk/config.dae
-}
-
-clash_system_matches() {
-	if [ "$clash_api_enabled" = 0 ]; then
-		! grep -q 'clash_api {' /etc/honk/system.dae
-		return
-	fi
-	permissions=$(ls -ldn /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
-	[ "$permissions" = '-rw-------' ] || return 1
-	grep -Fqx "        external_controller: '$system_host:$clash_api_port'" /etc/honk/system.dae || return 1
-	grep -Fqx "        external_ui: '/usr/share/honk/zashboard'" /etc/honk/system.dae || return 1
-	system_secret=$(sed -n "s/^        secret: '\([^']*\)'$/\1/p" /etc/honk/system.dae)
-	[ "$system_secret" = "$clash_api_secret" ]
-}
-
 repair() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
 	load_settings
-	if [ "$settings_owner" != system ]; then
-		check_config && { echo '{"ok":true,"message":"config_valid"}'; return 0; }
-		echo '{"ok":false,"message":"config_invalid"}'
-		return 1
-	fi
-	old_network=$lan_network
-	old_port=$listen_port
-	old_enabled=$enabled
-	old_boot_enabled=$boot_enabled
-	old_initialized=$initialized
-	old_clash_enabled=$clash_api_enabled
-	old_clash_port=$clash_api_port
-	old_clash_secret=$clash_api_secret
-	[ "$config_file" = /etc/honk/config.dae ] || { echo '{"ok":false,"message":"invalid_config_path"}'; return 1; }
-	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { echo '{"ok":false,"message":"main_config_unavailable"}'; return 1; }
-	main_hash=$(sha256sum /etc/honk/config.dae | awk '{print $1}')
-	main_has_system_include || { echo '{"ok":false,"message":"required_system_include_missing"}'; return 1; }
-	valid_network_name || { echo '{"ok":false,"message":"invalid_lan_network"}'; return 1; }
-	case "$listen_port" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
-	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || { echo '{"ok":false,"message":"invalid_listen_port"}'; return 1; }
-	valid_clash_api || { echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1; }
-	check_network || { echo '{"ok":false,"message":"lan_network_unavailable"}'; return 1; }
-	network_settings || { echo '{"ok":false,"message":"lan_ipv4_unavailable"}'; return 1; }
-	old_running=0
-	managed_core_pid >/dev/null 2>&1 && old_running=1
-	if pidof honk-core >/dev/null 2>&1 && [ "$old_running" = 0 ]; then echo '{"ok":false,"message":"unmanaged_core_running"}'; return 1; fi
-	if ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$listen_port" ]; }; then
-		check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
-	fi
-	if [ "$clash_api_enabled" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_clash_port)" = "$clash_api_port" ]; }; then
-		check_port "$clash_api_port" || { echo '{"ok":false,"message":"clash_api_port_occupied"}'; return 1; }
-	fi
-	honk_lock_acquire || { echo '{"ok":false,"message":"operation_in_progress"}'; return 1; }
-	trap 'honk_lock_release >/dev/null 2>&1' 0
-	load_settings
-	[ "$lan_network" = "$old_network" ] && [ "$listen_port" = "$old_port" ] && [ "$enabled" = "$old_enabled" ] && [ "$boot_enabled" = "$old_boot_enabled" ] && [ "$initialized" = "$old_initialized" ] && [ "$clash_api_enabled" = "$old_clash_enabled" ] && [ "$clash_api_port" = "$old_clash_port" ] && [ "$clash_api_secret" = "$old_clash_secret" ] || { echo '{"ok":false,"message":"settings_changed_concurrently"}'; return 1; }
-	managed_core_pid >/dev/null 2>&1 && recheck_running=1 || recheck_running=0
-	[ "$recheck_running" = "$old_running" ] || { echo '{"ok":false,"message":"service_state_changed_concurrently"}'; return 1; }
-	[ "$(sha256sum /etc/honk/config.dae | awk '{print $1}')" = "$main_hash" ] || { echo '{"ok":false,"message":"main_config_changed_concurrently"}'; return 1; }
-	check_network && network_settings || { echo '{"ok":false,"message":"lan_network_changed_during_repair"}'; return 1; }
-	if ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$listen_port" ]; }; then
-		check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
-	fi
-	if [ "$clash_api_enabled" = 1 ] && ! { [ "$old_running" = 1 ] && [ "$(configured_clash_port)" = "$clash_api_port" ]; }; then
-		check_port "$clash_api_port" || { echo '{"ok":false,"message":"clash_api_port_occupied"}'; return 1; }
-	fi
-	if [ "$initialized" = 1 ]; then system_host=$lan_ip; else system_host=127.0.0.1; fi
-	if [ -r /usr/share/doona/index.html ] && [ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] && system_config_readonly && \
-		grep -Fqx '    wan_interface: auto' /etc/honk/system.dae && grep -Fqx "    lan_interface: '$lan_device'" /etc/honk/system.dae && \
-		grep -Fqx "    data_dir: '/etc/honk'" /etc/honk/system.dae && grep -Fqx '    nfqueue_enable: true' /etc/honk/system.dae && \
-		grep -Fqx "        listen: '$system_host:$listen_port'" /etc/honk/system.dae && \
-		grep -Fqx "        ui: '/usr/share/doona'" /etc/honk/system.dae && grep -Fqx '        password_auth: true' /etc/honk/system.dae && \
-		grep -Fqx '        allow_anonymous_loopback: false' /etc/honk/system.dae && grep -Fqx '        config_write: true' /etc/honk/system.dae && clash_system_matches; then
-		echo '{"ok":true,"message":"system_config_healthy"}'
-		return 0
-	fi
-	if [ -e /etc/honk/system.dae ] && { [ ! -f /etc/honk/system.dae ] || [ -L /etc/honk/system.dae ]; }; then
-		echo '{"ok":false,"message":"system_config_not_regular_file"}'
-		return 1
-	fi
-	[ -r /usr/share/doona/index.html ] || { echo '{"ok":false,"message":"ui_assets_missing"}'; return 1; }
-	umask 077
-	repair_dir=$(mktemp -d /tmp/honk-repair.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
-	old_system=$repair_dir/system.dae
-	original_system_hash=""
-	if [ -f /etc/honk/system.dae ]; then
-		cp -p /etc/honk/system.dae "$old_system" || { rm -rf "$repair_dir"; echo '{"ok":false,"message":"system_snapshot_failed"}'; return 1; }
-		original_system_hash=$(sha256sum "$old_system" | awk '{print $1}')
-	fi
-	system_written_hash=$original_system_hash
-	if [ "$old_running" = 1 ]; then
-		if ! honk_lifecycle_stop 30; then
-			logger -t honk "repair stop/drain unconfirmed; no restart attempted; snapshot retained at $repair_dir"
-			echo '{"ok":false,"message":"service_stop_unconfirmed_snapshot_retained"}'
-			return 1
-		fi
-	fi
-	if [ "$initialized" = 1 ]; then system_listen=$lan_ip; else system_listen=127.0.0.1; fi
-	if ! write_runtime_system "$lan_device" "$lan_ip" "$listen_port" "$system_listen"; then
-		repair_rollback_ok=1
-		[ -n "$system_written_hash" ] && ! restore_system && repair_rollback_ok=0
-		restore_old_runtime || repair_rollback_ok=0
-		if [ "$repair_rollback_ok" = 1 ]; then
-			rm -rf "$repair_dir"
-			echo '{"ok":false,"message":"system_config_repair_failed_rolled_back"}'
-		else
-			logger -t honk "repair rollback failed; snapshot retained at $repair_dir"
-			echo '{"ok":false,"message":"system_config_repair_rollback_failed_snapshot_retained"}'
-		fi
-		return 1
-	fi
-	if [ "$initialized" = 1 ] && { [ "$old_running" = 1 ] || [ "$enabled" = 1 ]; }; then
-		if ! honk_lifecycle_start 30; then
-			repair_rollback_ok=1
-			honk_lifecycle_stop 30 || repair_rollback_ok=0
-			if [ "$repair_rollback_ok" = 1 ]; then restore_system || repair_rollback_ok=0; fi
-			restore_old_runtime || repair_rollback_ok=0
-			if [ "$repair_rollback_ok" = 1 ]; then
-				rm -rf "$repair_dir"
-				echo '{"ok":false,"message":"repair_restart_failed_rolled_back"}'
-			else
-				logger -t honk "repair restart rollback failed; snapshot retained at $repair_dir"
-				echo '{"ok":false,"message":"repair_restart_and_rollback_failed_snapshot_retained"}'
-			fi
-			return 1
-		fi
-	fi
-	system_written_hash=""
-	rm -rf "$repair_dir"
-	echo '{"ok":true,"message":"system_config_repaired"}'
+	check_config && { echo '{"ok":true,"message":"config_valid"}'; return 0; }
+	echo '{"ok":false,"message":"config_invalid"}'
+	return 1
 }
 
 api_discovery() {
@@ -1389,11 +1286,7 @@ api_discovery() {
 mock_start() {
 	mock_config=$1
 	mock_log=$2
-	# 与真实核心用同一个 --data-dir：Doona 管理员口令存在 <data_dir>/state/honk.db，
-	# 两边不一致的话 mock 建好的账号真实核心看不到（登录永远提示先初始化）。
-	mock_data_dir=$(sed -n "s/^[[:space:]]*data_dir:[[:space:]]*'\([^']*\)'.*/\1/p" "$mock_config" 2>/dev/null | head -1)
-	[ -n "$mock_data_dir" ] || mock_data_dir=/etc/honk
-	DAE_LOCATION_ASSET=/etc/honk "$HONK_CORE" --config "$mock_config" --data-dir "$mock_data_dir" --mock-ebpf > "$mock_log" 2>&1 &
+	DAE_LOCATION_ASSET=/usr/share/v2ray "$HONK_CORE" --config "$mock_config" --mock-ebpf > "$mock_log" 2>&1 &
 	mock_pid=$!
 	mock_identity=""
 	attempt=0
@@ -1446,12 +1339,9 @@ post_credentials() {
 
 initialize_preflight() {
 	load_settings
-	# 服务必须停着（初始化要建账号、要写配置）。
-	# initialized=1 也放行：升级固件后状态库里的管理员记录可能没了，
-	# 面板会要求「新建管理员」，LuCI 这边要能做同一件事；
-	# 管理员还在的话 initialize 走的是登录分支，不会覆盖已有账号。
-	[ "$enabled" = 0 ] || { echo '{"ok":false,"message":"disable_service_before_initialization"}'; return 1; }
+	[ "$enabled" = 0 ] && [ "$initialized" = 0 ] || { echo '{"ok":false,"message":"disable_service_before_initialization"}'; return 1; }
 	[ "$config_file" = /etc/honk/config.dae ] || { echo '{"ok":false,"message":"invalid_config_path"}'; return 1; }
+	[ -f /usr/share/honk/default-config.dae ] && [ ! -L /usr/share/honk/default-config.dae ] || { echo '{"ok":false,"message":"default_config_unavailable"}'; return 1; }
 	[ -r /usr/share/doona/index.html ] || { echo '{"ok":false,"message":"ui_assets_missing"}'; return 1; }
 	if [ "$1" = read_credentials ]; then
 		read_credentials || { echo '{"ok":false,"message":"invalid_credentials"}'; return 1; }
@@ -1460,11 +1350,89 @@ initialize_preflight() {
 	command -v curl >/dev/null 2>&1 || { echo '{"ok":false,"message":"curl_missing"}'; return 1; }
 	pidof honk-core >/dev/null 2>&1 && { echo '{"ok":false,"message":"core_already_running"}'; return 1; }
 	no_honk_resources || { echo '{"ok":false,"message":"honk_resources_already_exist"}'; return 1; }
+	case "$listen_port" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
+	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || { echo '{"ok":false,"message":"invalid_listen_port"}'; return 1; }
+	valid_clash_api || { echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1; }
+	[ "$clash_api_enabled" != 1 ] || check_port "$clash_api_port" || { echo '{"ok":false,"message":"clash_api_port_occupied"}'; return 1; }
 	check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
 	check_network || { echo '{"ok":false,"message":"lan_network_unavailable"}'; return 1; }
 	network_settings || { echo '{"ok":false,"message":"lan_ipv4_unavailable"}'; return 1; }
+	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { echo '{"ok":false,"message":"main_config_unavailable"}'; return 1; }
+	default_config_matches /etc/honk/config.dae || { echo '{"ok":false,"message":"custom_config_requires_configuration_page"}'; return 1; }
 	check_config || { echo '{"ok":false,"message":"invalid_package_config"}'; return 1; }
 	return 0
+}
+
+# 允许安装模板中由本机地址同步器维护的 local-direct 标记区块变化。
+# 归一只剥渲染器会写回的运行字段，业务规则照原样比对。
+normalize_default_config() {
+	awk '
+		/^    # honk:local-direct-begin$/ { print; inside = 1; next }
+		inside && /^    # honk:local-direct-end$/ { print; inside = 0; next }
+		inside { next }
+		/^    clash_api \{$/ { in_clash = 1; print; next }
+		in_clash && /^    \}$/ { in_clash = 0; print; next }
+		in_clash && /^        (external_controller|secret): / { print "        " substr($0, 9, index($0, ":") - 9) ": <managed>"; next }
+		/^    lan_interface: / { print "    lan_interface: <managed>"; next }
+		/^    nfqueue_enable: (true|false)$/ { print "    nfqueue_enable: <managed>"; next }
+		/^        listen: / { print "        listen: <managed>"; next }
+		{ print }
+		END { if (inside) exit 1 }
+	' "$1"
+}
+
+default_config_matches() {
+	match_main=$(mktemp /tmp/honk-init-main.XXXXXX) || return 1
+	match_default=$(mktemp /tmp/honk-init-default.XXXXXX) || { rm -f "$match_main"; return 1; }
+	normalize_default_config "$1" > "$match_main" && normalize_default_config "${2:-/usr/share/honk/default-config.dae}" > "$match_default"
+	match_status=$?
+	[ "$match_status" = 0 ] && cmp -s "$match_main" "$match_default"
+	match_status=$?
+	rm -f "$match_main" "$match_default"
+	return "$match_status"
+}
+
+# 初始化只改安装模板中的运行字段，业务规则保持原样。
+render_initial_config() {
+	awk -v device="$1" -v host="$2" -v nfq="$3" -v port="$listen_port" \
+		-v api_enabled="$clash_api_enabled" -v api_port="$clash_api_port" -v api_secret="$clash_api_secret" '
+		/^    lan_interface: .*$/ { print "    lan_interface: " device; lan++; next }
+		/^    nfqueue_enable: (true|false)$/ { print "    nfqueue_enable: " nfq; queue++; next }
+		/^        listen: .*$/ { print "        listen: '\''" host ":" port "'\''"; listen++; next }
+		/^    clash_api \{$/ { in_clash = 1; clash++; print; next }
+		in_clash && /^        external_controller:/ {
+			# 关闭时写空串，等价于核心侧不监听，块本身保留以便再次启用。
+			if (api_enabled == 1) print "        external_controller: '\''" host ":" api_port "'\''"
+			else print "        external_controller: '\'''\''"
+			controller++; next
+		}
+		in_clash && /^        secret:/ { print "        secret: '\''" api_secret "'\''"; secret++; next }
+		in_clash && /^    }$/ { in_clash = 0; print; next }
+		/^experimental \{$/ { in_experimental = 1; depth = 1; print; next }
+		in_experimental {
+			if ($0 ~ /^[[:space:]]*}$/) {
+				if (depth == 1 && api_enabled == 1 && clash == 0) {
+					print "    clash_api {"
+					print "        external_controller: '\''" host ":" api_port "'\''"
+					print "        external_ui: '\''/usr/share/honk/zashboard'\''"
+					print "        secret: '\''" api_secret "'\''"
+					print "        default_mode: Rule"
+					print "    }"
+					clash = 1; controller = 1; secret = 1
+				}
+				depth--
+				if (depth == 0) in_experimental = 0
+			} else if ($0 ~ /\{$/) depth++
+			print
+			next
+		}
+		{ print }
+		END {
+			if (lan != 1 || queue != 1 || listen != 1) exit 1
+			if (api_enabled == 1 && (clash != 1 || controller != 1 || secret != 1)) exit 1
+			# 关闭时允许 clash 块存在，块内 controller 会被渲染成空串。
+		}
+	' "${4:-/etc/honk/config.dae}"
 }
 
 initialize() {
@@ -1480,12 +1448,21 @@ initialize() {
 	mock_pid=""
 	trap cleanup_initialize 0
 	trap 'exit 1' HUP INT TERM
-	old_system=$temp_dir/system.dae
-	cp -p /etc/honk/system.dae "$old_system" || { echo '{"ok":false,"message":"system_config_backup_failed"}'; return 1; }
-	original_system_hash=$(sha256sum "$old_system" | awk '{print $1}')
-	system_written_hash=$original_system_hash
-	ensure_loopback_system || { echo '{"ok":false,"message":"loopback_listener_write_failed"}'; return 1; }
-	mock_config=$temp_dir/mock.dae
+	initialize_committed=0
+	main_written=0
+	main_install_pending=0
+	main_config_path=/etc/honk/config.dae
+	[ -f "$main_config_path" ] && [ ! -L "$main_config_path" ] || { echo '{"ok":false,"message":"main_config_changed_concurrently"}'; return 1; }
+	old_main=$temp_dir/config.dae
+	cp -p "$main_config_path" "$old_main" || { echo '{"ok":false,"message":"main_config_backup_failed"}'; return 1; }
+	original_main_hash=$(sha256sum "$old_main" | awk '{print $1}')
+	[ -f "$main_config_path" ] && [ ! -L "$main_config_path" ] || { echo '{"ok":false,"message":"main_config_changed_concurrently"}'; return 1; }
+	main_hash=$(sha256sum "$main_config_path" | awk '{print $1}')
+	[ "$main_hash" = "$original_main_hash" ] || { echo '{"ok":false,"message":"main_config_changed_concurrently"}'; return 1; }
+	default_config_matches "$old_main" || { echo '{"ok":false,"message":"main_config_changed_concurrently"}'; return 1; }
+	old_uci=$temp_dir/honk.uci
+	uci export honk > "$old_uci" && chmod 0600 "$old_uci" || { echo '{"ok":false,"message":"uci_snapshot_failed"}'; return 1; }
+	mock_config=$temp_dir/candidate.dae
 	mock_log=$temp_dir/core.log
 	response_file=$temp_dir/response.json
 	cat > "$mock_config" <<EOF
@@ -1509,7 +1486,7 @@ global {
     }
 }
 EOF
-	chmod 0600 "$mock_config" "$mock_log" 2>/dev/null || true
+	chmod 0600 "$mock_config" 2>/dev/null || true
 	loopback_url="http://127.0.0.1:$listen_port"
 	if ! mock_start "$mock_config" "$mock_log" "$loopback_url" "$response_file"; then
 		echo '{"ok":false,"message":"mock_core_start_failed"}'
@@ -1541,37 +1518,39 @@ EOF
 	status=$(post_credentials "$loopback_url/api/v1/auth/login" "$response_file")
 	[ "$status" = 200 ] || { echo '{"ok":false,"message":"persistence_login_failed"}'; return 1; }
 	mock_stop || { echo '{"ok":false,"message":"mock_core_stop_failed"}'; return 1; }
-	# 管理员记录要先落进 honk.db 本身：SQLite 的 WAL 模式下它先写在
-	# honk.db-wal 里，固件升级把 -wal 弄丢了，管理员记录就没了
-	# （面板会要求新建管理员，而 LuCI 看着一切正常）。
-	/usr/share/honk/maintenance.sh checkpoint >/dev/null 2>&1 || :
 
-	write_runtime_system "$lan_device" "$lan_ip" || { restore_system; echo '{"ok":false,"message":"system_config_write_failed"}'; return 1; }
+	# 认证完成并停止最小 mock 后，再生成和校验完整 LAN 候选。
+	[ "$runtime_nfqueue_enable" = true ] || [ "$runtime_nfqueue_enable" = false ] || { echo '{"ok":false,"message":"nfqueue_runtime_unavailable"}'; return 1; }
+	mock_config=$temp_dir/candidate.dae
+	render_initial_config "$lan_device" "$lan_ip" "$runtime_nfqueue_enable" "$old_main" > "$mock_config" || { echo '{"ok":false,"message":"default_config_render_failed"}'; return 1; }
+	wan_device=$(network_wan_device)
+	sync_local_direct "$mock_config" "$lan_device" "$wan_device" || { echo '{"ok":false,"message":"local_direct_render_failed"}'; return 1; }
+	"$HONK_CORE" config validate --config "$mock_config" >/dev/null 2>&1 || { echo '{"ok":false,"message":"candidate_config_invalid"}'; return 1; }
 	lan_url="http://$lan_ip:$listen_port"
-	if ! mock_start /etc/honk/config.dae "$mock_log" "$lan_url" "$response_file"; then
-		restore_system
-		echo '{"ok":false,"message":"generated_config_invalid_restored_loopback"}'
+	if ! mock_start "$mock_config" "$mock_log" "$lan_url" "$response_file"; then
+		echo '{"ok":false,"message":"candidate_config_invalid"}'
 		return 1
 	fi
 	api_discovery "$lan_url" "$response_file" || {
 		mock_stop >/dev/null 2>&1
-		restore_system
-		echo '{"ok":false,"message":"lan_api_verification_failed_restored_loopback"}'
+		echo '{"ok":false,"message":"lan_api_verification_failed"}'
 		return 1
 	}
 	mock_stop || {
-		restore_system
-		echo '{"ok":false,"message":"mock_core_stop_failed_restored_loopback"}'
+		echo '{"ok":false,"message":"mock_core_stop_failed"}'
 		return 1
 	}
+	"$HONK_CORE" config validate --config "$mock_config" >/dev/null 2>&1 || { echo '{"ok":false,"message":"candidate_config_invalid"}'; return 1; }
+	if ! initialize_install_main "$mock_config" "$main_config_path" "$original_main_hash"; then
+		[ "$initialize_error" = main_changed ] && { echo '{"ok":false,"message":"main_config_changed_concurrently"}'; return 1; }
+		echo '{"ok":false,"message":"main_config_write_failed"}'
+		return 1
+	fi
 	uci set honk.main.initialized='1' && uci commit honk || {
-		restore_system
-		uci set honk.main.initialized='0' >/dev/null 2>&1
-		uci commit honk >/dev/null 2>&1
-		echo '{"ok":false,"message":"uci_commit_failed_restored_loopback"}'
+		echo '{"ok":false,"message":"uci_commit_failed_main_restore_pending"}'
 		return 1
 	}
-	system_written_hash=""
+	initialize_committed=1
 	password=""
 	username=""
 	echo '{"ok":true,"message":"administrator_initialized"}'
@@ -1607,6 +1586,100 @@ recover() {
 	echo '{"ok":true,"message":"transaction_recovered"}'
 }
 
+# 回滚后要核实文件、开关和服务，否则不能报 rolled_back。
+system_rollback() {
+	_rs_file=$1; _rs_backup=$2; _rs_hash=$3; _rs_managed=$4; _rs_running=$5
+	rollback_state=incomplete
+	if ! cp -p "$_rs_backup" "$_rs_file" 2>/dev/null; then
+		_rs_keep=/tmp/honk-rollback-$(date +%s)-$(basename "$_rs_file")
+		cp -p "$_rs_backup" "$_rs_keep" 2>/dev/null && chmod 0600 "$_rs_keep" 2>/dev/null
+		logger -t honk "rollback: restore file failed; backup=$_rs_keep"
+		return 1
+	fi
+	uci set honk.main.system_managed="$_rs_managed" >/dev/null 2>&1 && uci commit honk >/dev/null 2>&1 || :
+	_rs_ready=0
+	if [ "$_rs_running" = 1 ]; then honk_lifecycle_start 15 >/dev/null 2>&1 && _rs_ready=1; fi
+	_rs_now=$(sha256sum "$_rs_file" 2>/dev/null | awk '{print $1}')
+	_rs_flag=$(uci -q get honk.main.system_managed); [ -n "$_rs_flag" ] || _rs_flag=1
+	if [ "$_rs_now" = "$_rs_hash" ] && [ "$_rs_flag" = "$_rs_managed" ] &&
+		{ [ "$_rs_running" != 1 ] || [ "$_rs_ready" = 1 ]; }; then
+		rollback_state=rolled_back
+	else
+		# 回滚不完整时不能把备份一起删掉
+		_rs_keep=/tmp/honk-rollback-$(date +%s)-$(basename "$_rs_file")
+		cp -p "$_rs_backup" "$_rs_keep" 2>/dev/null && chmod 0600 "$_rs_keep" 2>/dev/null
+		logger -t honk "rollback incomplete: hash=$_rs_now managed=$_rs_flag ready=$_rs_ready backup=$_rs_keep"
+	fi
+}
+
+system_rollback_state() { printf '%s\n' "${rollback_state:-incomplete}"; }
+
+
+# 自管模式：候选 system.dae 以文件路径传入，校验的是新文件组成的完整配置。
+write_system_config() {
+	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
+	sys=/etc/honk/system.dae
+	[ -f "$sys" ] && [ ! -L "$sys" ] || { echo '{"ok":false,"message":"system_config_unavailable"}'; return 1; }
+	candidate=$1
+	[ -f "$candidate" ] && [ ! -L "$candidate" ] || { echo '{"ok":false,"message":"system_config_unavailable"}'; return 1; }
+	[ "$(wc -c < "$candidate" 2>/dev/null)" -le 262144 ] 2>/dev/null || { echo '{"ok":false,"message":"content_too_large"}'; return 1; }
+	[ -s "$candidate" ] || { echo '{"ok":false,"message":"content_empty"}'; return 1; }
+
+	honk_lock_acquire || { echo '{"ok":false,"message":"operation_in_progress"}'; return 1; }
+	trap 'honk_lock_release >/dev/null 2>&1' 0
+
+	umask 077
+	work=$(mktemp -d /tmp/honk-syssave.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	# 备份放稳定路径：进程被中断时也要能把文件和开关还原
+	committed=0
+	prev=/etc/honk/.system-prev.dae
+	cp -p "$sys" "$prev" || { rm -rf "$work"; echo '{"ok":false,"message":"system_config_backup_failed"}'; return 1; }
+	trap 'if [ "$committed" != 1 ]; then cp -p "$prev" "$sys" 2>/dev/null; [ -z "${old_managed:-}" ] || uci set honk.main.system_managed="$old_managed" >/dev/null 2>&1; uci commit honk >/dev/null 2>&1; logger -t honk "save interrupted, restored system.dae"; fi; rm -f "$prev"; rm -rf "$work"; honk_lock_release >/dev/null 2>&1' 0
+	cp -p "$sys" "$work/orig-system.dae" || { echo '{"ok":false,"message":"system_config_backup_failed"}'; return 1; }
+	# 整棵树带过来，include 到子目录时才校验得到实际生效的那份
+	find /etc/honk -path /etc/honk/state -prune -o -type f -print > "$work/files.txt" || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	while IFS= read -r cfg_src; do
+		cfg_rel=${cfg_src#/etc/honk/}
+		[ "$cfg_rel" = system.dae ] && continue
+		cfg_dir=$(dirname "$cfg_rel")
+		[ "$cfg_dir" = . ] || mkdir -p "$work/$cfg_dir" || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+		cp -p "$cfg_src" "$work/$cfg_rel" || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	done < "$work/files.txt"
+	cp "$candidate" "$work/system.dae" || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	# 主配置没 include system.dae 时，保存成功也不会生效，直接拒绝。
+	[ -n "$(config_includes_system "$work/config.dae")" ] || { echo '{"ok":false,"message":"system_config_not_included"}'; return 1; }
+	"$HONK_CORE" config validate --config "$work/config.dae" >/dev/null 2>&1 || { echo '{"ok":false,"message":"config_invalid"}'; return 1; }
+
+	system_written_hash=$(sha256sum "$sys" | awk '{print $1}')
+	pending=$(mktemp /etc/honk/.system.dae.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	cp "$candidate" "$pending" && chmod 0600 "$pending" || { rm -f "$pending"; echo '{"ok":false,"message":"system_config_write_failed"}'; return 1; }
+	[ "$(sha256sum "$sys" | awk '{print $1}')" = "$system_written_hash" ] || { rm -f "$pending"; echo '{"ok":false,"message":"system_config_changed"}'; return 1; }
+
+	old_managed=$(uci -q get honk.main.system_managed)
+	[ -n "$old_managed" ] || old_managed=1
+	was_running=0
+	managed_core_pid >/dev/null 2>&1 && was_running=1
+	mv -f "$pending" "$sys" || { rm -f "$pending"; echo '{"ok":false,"message":"system_config_write_failed"}'; return 1; }
+	uci set honk.main.system_managed=0 && uci commit honk || {
+		system_rollback "$sys" "$work/orig-system.dae" "$system_written_hash" "$old_managed" "$was_running"
+		printf '{"ok":false,"message":"settings_commit_failed_%s"}\n' "$(system_rollback_state)"; return 1
+	}
+
+	if [ "$was_running" = 1 ] && ! honk_lifecycle_restart 12 >/dev/null 2>&1; then
+		system_rollback "$sys" "$work/orig-system.dae" "$system_written_hash" "$old_managed" "$was_running"
+		printf '{"ok":false,"message":"system_config_start_failed_%s"}\n' "$(system_rollback_state)"; return 1
+	fi
+	committed=1
+	echo '{"ok":true,"message":"system_config_saved"}'
+}
+
+# 切回面板管理：dry_run 只回将要生成的内容，确认后再替换。
+panel_managed_system() {
+	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
+	echo '{"ok":false,"message":"runtime_settings_owned_by_file"}'
+	return 1
+}
+
 case "$1" in
 	check)
 		preflight
@@ -1619,7 +1692,13 @@ case "$1" in
 		;;
 	local-direct)
 		load_settings
-		sync_local_direct
+		network_settings >/dev/null 2>&1 || :
+		sync_local_direct /etc/honk/config.dae "$lan_device" "$(network_wan_device)"
+		;;
+	local-direct-file)
+		load_settings
+		shift
+		sync_local_direct "$@"
 		;;
 	migrate)
 		migrate_geodata_assets
@@ -1649,11 +1728,17 @@ case "$1" in
 	detach)
 		detach
 		;;
+	write-system)
+		write_system_config "$2"
+		;;
+	panel-managed)
+		panel_managed_system
+		;;
 	recover)
 		recover
 		;;
 	*)
-		echo "usage: $0 {check|diagnose|preflight|local-direct|migrate|initialize|settings|sync-db|geodata-sources|geodata-files|geodata-status|repair|detach|recover}" >&2
+		echo "usage: $0 {check|diagnose|preflight|local-direct|local-direct-file|migrate|sync-db|geodata-sources|geodata-files|geodata-status|initialize|settings|repair|detach|recover|write-system|panel-managed}" >&2
 		exit 2
 		;;
 esac
