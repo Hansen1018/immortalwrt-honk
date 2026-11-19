@@ -29,13 +29,17 @@ honk_cgroup_delegate_memory() {
 	# 内核没有编译 memory 控制器时没什么可委派的
 	grep -qw memory "$base/cgroup.controllers" 2>/dev/null || return 0
 	mkdir -p "$base/services/honk/main" 2>/dev/null || return 0
-	# 只动我们自己的那两个目录：services 是所有服务共用的，改它的权限会
-	# 影响到别的服务（上游没有这一段，面板的 cgroup 一栏空着也一样）。
+	# 只动我们自己的那两个目录。services 是所有服务共用的，改它的权限会影响到
+	# 别的服务；委派本身只是往三处 subtree_control 里写 +memory，不需要改权限
+	# （在私有的 cgroup 命名空间里验过：共享目录保持 0755 时三处写入都成功，实例
+	# cgroup 里照样出现 memory.current / memory.max / memory.events）。
 	chmod 0700 "$base/services/honk" "$base/services/honk/main" 2>/dev/null
-	# 从上往下逐级委派：控制器只对子树_control 里打开的那一级以下的子 cgroup 生效
-	echo +memory > "$base/cgroup.subtree_control" 2>/dev/null || return 0
-	echo +memory > "$base/services/cgroup.subtree_control" 2>/dev/null || return 0
-	echo +memory > "$base/services/honk/cgroup.subtree_control" 2>/dev/null || return 0
+	# 从上往下逐级委派：控制器只对子树_control 里打开的那一级以下的子 cgroup 生效。
+	# 某一级写不进去就记一笔，不中断后面的：面板的 cgroup 一栏靠实例 cgroup 里的
+	# memory.current，缺文件时下面那一句会说明。
+	echo +memory > "$base/cgroup.subtree_control" 2>/dev/null || logger -t honk "the memory controller could not be enabled in the root cgroup"
+	echo +memory > "$base/services/cgroup.subtree_control" 2>/dev/null || logger -t honk "the memory controller could not be enabled in the services cgroup"
+	echo +memory > "$base/services/honk/cgroup.subtree_control" 2>/dev/null || logger -t honk "the memory controller could not be enabled in the honk service cgroup"
 	[ -f "$base/services/honk/main/memory.current" ] || logger -t honk "the memory controller is not delegated to the instance cgroup; the panel's cgroup row stays empty"
 }
 
