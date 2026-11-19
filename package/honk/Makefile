@@ -136,25 +136,17 @@ exit 0
 endef
 
 # 只在无核心、当前是本包模板、关联文件未变且身份匹配时写回。
-ifeq ($(CONFIG_USE_APK),)
-# IPK：opkg 原生把本段落成 postinst-pkg，default_postinst 在 start 前 source。
 define Package/honk/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
+# 升级前的那份配置在装好后写回（装包脚本在 default_postinst 的 start 之前跑）。
 . /usr/share/honk/preupgrade-restore.sh
-endef
-endif
-
-define Package/honk/postinst
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || { \
-	# apk 升级不会重启服务：核心还拿着旧的资产目录（只读分区里那份）和旧的
-	# 下载源清单，面板的「立即更新」于是还是停在替换阶段。核心在跑就重启一次：
-	# 启动流程会把准备重跑一遍（补地理数据文件、清库、写下载源清单），新的
-	# 配置与可写的资产目录随即可用。刷固件本来就会重启，这条只管 apk 这条路。
-	pidof honk-core >/dev/null 2>&1 && /etc/init.d/honk restart >/dev/null 2>&1 || :
-	exit 0
-}
+# apk 升级不会重启服务：核心还拿着旧的资产目录（只读分区里那份）和旧的
+# 下载源清单，面板的「立即更新」于是还是停在替换阶段。核心在跑就重启一次：
+# 启动流程会把准备重跑一遍（补地理数据文件、写下载源清单），新的
+# 配置与可写的资产目录随即可用。刷固件本来就会重启，这条只管 apk 这条路。
+pidof honk-core >/dev/null 2>&1 && /etc/init.d/honk restart >/dev/null 2>&1 || :
+exit 0
 endef
 
 define Build/Prepare

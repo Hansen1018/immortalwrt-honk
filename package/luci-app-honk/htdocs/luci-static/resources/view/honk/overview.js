@@ -277,7 +277,11 @@ return view.extend({
 			const listenPortInput = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'name': 'listen_port', 'id': 'honk-listen-port', 'min': '1', 'max': '65535', 'step': '1' });
 			listenPortInput.value = listenParts[1] || (status.listen_port ? String(status.listen_port) : '9527');
 
-			const clashEnabledInput = E('input', { 'type': 'checkbox', 'name': 'clash_api_enabled', 'id': 'honk-clash-enabled' });
+			const storeSelect = E('select', { 'class': 'cbi-input-select', 'name': 'store', 'id': 'honk-store-mode' });
+	storeSelect.appendChild(E('option', { 'value': 'db' }, _('Database (the panel keeps the import and the revision history)')));
+	storeSelect.appendChild(E('option', { 'value': 'file' }, _('File (the configuration file is the only truth)')));
+	storeSelect.value = status.store_configured === 'file' ? 'file' : 'db';
+	const clashEnabledInput = E('input', { 'type': 'checkbox', 'name': 'clash_api_enabled', 'id': 'honk-clash-enabled' });
 			clashEnabledInput.checked = status.clash_api_enabled === true;
 			const clashSwitch = honk.switchControl(clashEnabledInput);
 			const clashPortInput = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'name': 'clash_api_port', 'id': 'honk-clash-port', 'min': '1', 'max': '65535', 'step': '1' });
@@ -304,6 +308,7 @@ return view.extend({
 				card.appendChild(E('p', { 'class': 'honk-note' }, _('This configuration is managed by the panel. Saving keeps the previous layout.')));
 			form.appendChild(field(_('LAN interface'), lanSelect));
 			form.appendChild(field(_('Listen port'), listenPortInput));
+			form.appendChild(field(_('Storage mode'), storeSelect));
 			form.appendChild(field(_('Enable Clash API'), clashSwitch));
 			form.appendChild(field(_('Clash API port'), clashPortInput));
 			form.appendChild(field(_('Clash API secret'), clashSecretInput,
@@ -342,6 +347,7 @@ return view.extend({
 					clash_api_port: clashPort,
 					clash_api_secret: secret,
 					clash_api_secret_mode: mode,
+					store: storeSelect.value,
 					expect_sha256: formSnapshotSha
 				}).then(honk.ensureOk).then(function(result) {
 					formSnapshotSha = null;

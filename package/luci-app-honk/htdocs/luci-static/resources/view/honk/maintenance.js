@@ -38,7 +38,7 @@ const DATA_PATHS = {
 // and the v2fly addresses are GitHub release links that redirect (the core
 // does not follow redirects).
 const GEO_PRESETS = {
-	default: {
+	loyalsoldier: {
 		geoip: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat',
 		geosite: 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat'
 	},
@@ -220,9 +220,9 @@ return view.extend({
 			const auto0 = uci.get('honk', 'main', 'geo_auto') === '1';
 			const freq0 = uci.get('honk', 'main', 'geo_auto_freq') || 'daily';
 			const preset0 = (function() {
-				if (!gi0 && !gs0) return 'default';
+				if (!gi0 && !gs0) return 'loyalsoldier';
 				for (const id of Object.keys(GEO_PRESETS)) {
-					if (id === 'default') continue;
+					if (id === 'loyalsoldier') continue;
 					const preset = GEO_PRESETS[id];
 					if (gi0 === preset.geoip && gs0 === preset.geosite) return id;
 				}
@@ -230,9 +230,8 @@ return view.extend({
 			})();
 
 			const presetSel = E('select', { 'class': 'cbi-input-select', 'id': 'honk-geo-preset' }, [
-				E('option', { 'value': 'default' }, _("Default (the core's own list)")),
-				E('option', { 'value': 'metacubex' }, 'MetaCubeX'),
 				E('option', { 'value': 'loyalsoldier' }, 'Loyalsoldier'),
+				E('option', { 'value': 'metacubex' }, 'MetaCubeX'),
 				E('option', { 'value': 'custom' }, _('Custom'))
 			]);
 			presetSel.value = preset0;

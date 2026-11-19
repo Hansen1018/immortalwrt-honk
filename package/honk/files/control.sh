@@ -26,6 +26,7 @@ load_settings() {
 	config_get_bool initialized main initialized 0
 	config_get config_file main config_file /etc/honk/config.dae
 	config_get listen_port main listen_port 9527
+	config_get store_mode main store db
 	config_get_bool clash_api_enabled main clash_api_enabled 0
 	config_get clash_api_port main clash_api_port 9090
 	config_get clash_api_secret main clash_api_secret ''
@@ -322,15 +323,6 @@ lock_owner_invalid() {
 	return 1
 }
 
-# 配置文件树的内容指纹：改了没有。
-config_tree_hash() {
-	{
-		for file in /etc/honk/config.dae /etc/honk/system.dae; do
-			[ -f "$file" ] && [ ! -L "$file" ] && sha256sum "$file" 2>/dev/null
-		done
-	} | sha256sum 2>/dev/null | awk '{print $1}'
-}
-
 # db 模式下核心跑的是状态库里的修订，配置文件改了不会生效（上游原话：
 # "File edits reach the database only through import"）。上游的规矩是
 # 「库里没有修订时，启动会导入 -c」—— 把核心自己的那几张表清空（管理员
@@ -345,57 +337,6 @@ config_tree_hash() {
 #     重插那一条，留着不冲突。
 #   sqlite_sequence：revision 的编号计数，清了只是从 1 重新编号。
 #
-# 什么时候清：配置文件改了（指纹对不上），或者库里存的地理数据下载源已经
-# 过时（见 honk_stale_geodata_url）。清成功之后才记下指纹：记早了的话，清
-# 失败下一次就不会再清。
-sync_db_revisions() {
-	load_settings
-	config_get store_mode main store db
-	[ "$store_mode" = db ] || { echo '{"ok":true,"message":"store_mode_not_db"}'; return 0; }
-	# 核心在跑的时候不动它的库：清完库里的 head，核心手里的 head 就指着
-	# 一条不存在的修订，下一次写库会失败。等它下次启动再导入。
-	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
-	db=/etc/honk/state/honk.db
-	[ -f "$db" ] && [ ! -L "$db" ] || { echo '{"ok":true,"message":"state_database_absent"}'; return 0; }
-	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
-	current=$(config_tree_hash)
-	stored=$(cat /etc/honk/.file-hash 2>/dev/null || echo '')
-	stale_url=$(honk_stale_geodata_url "$db")
-	if [ -z "$current" ] || { [ "$current" = "$stored" ] && [ -z "$stale_url" ]; }; then
-		echo '{"ok":true,"message":"configuration_unchanged"}'
-		return 0
-	fi
-	for api in native_api clash_api; do
-		secret=$(sqlite3 "$db" "SELECT value FROM listener_secret WHERE api='$api';" 2>/dev/null)
-		[ -n "$secret" ] || continue
-		grep -qF -- "$secret" /etc/honk/config.dae /etc/honk/system.dae 2>/dev/null || continue
-		sqlite3 "$db" "DELETE FROM listener_secret WHERE api='$api';" 2>/dev/null || :
-	done
-	if ! sqlite3 "$db" "PRAGMA foreign_keys=ON; DELETE FROM head; DELETE FROM revision; DELETE FROM sqlite_sequence WHERE name='revision';" >/dev/null 2>&1; then
-		echo '{"ok":false,"message":"revisions_not_cleared"}'
-		return 1
-	fi
-	[ -n "$current" ] && printf '%s' "$current" > /etc/honk/.file-hash 2>/dev/null || :
-	logger -t honk "the state db will re-import the current config at the next start"
-	echo '{"ok":true,"message":"revisions_cleared"}'
-}
-
-# 库里存的地理数据下载源是不是过时的：它写着「从配置文件来的」地址，而当前
-# 配置文件里没有这个地址。核心只在启动时算一次这份清单（Sources::open 里的
-# seed），过时的那份就一直用下去 —— 面板的「立即更新」因此只会超时。
-# 库里用户自己设的地址（from_config 为 false）不算过时，那份不动。
-# 打印过时的那份地址（没有就不打印）。
-honk_stale_geodata_url() {
-	record=$(sqlite3 "$1" 'SELECT record FROM geodata_settings WHERE id=1;' 2>/dev/null) || return 0
-	[ -n "$record" ] || return 0
-	printf '%s\n' "$record" | sed 's/{"urls"/\n{"urls"/g' | while IFS= read -r entry; do
-		case "$entry" in *'"from_config"'*true*) ;; *) continue ;; esac
-		url=$(printf '%s' "$entry" | sed -n 's/.*"urls":\["\([^"]*\)"\].*/\1/p')
-		[ -n "$url" ] || continue
-		grep -qF -- "$url" /etc/honk/config.dae /etc/honk/system.dae 2>/dev/null || printf '%s\n' "$url"
-	done
-}
-
 # 只读诊断：面板的「立即更新」能不能成，取决于下面这几件事。核心启动时把
 # 地理数据读成资产，资产在不在、读得出来吗，库里的下载源清单是哪几个地址，
 # 配置里有没有写死地址（写了就由它说了算），升级后核心有没有重起过。
@@ -471,6 +412,27 @@ geodata_status() {
 # 代理也通 —— 这些地址不需要代理。走代理要代理组里有能到达的节点，墙内常常没有，
 # 面板的「立即更新」于是卡在下载阶段。用户在面板里改过出口（存着的）就不动：那
 # 是他的选择。
+
+# db 存储模式下核心拒绝 Clash API（"experimental.clash_api.external_controller is
+# set; --store db runs without the Clash API"），而升级上来的主配置里还带着那一段
+# （新模板没有了，磁盘上的 conffile 还在）—— 核心会直接退出，服务起不来。
+# 这里把那一段从主配置里去掉，留一份备份。file 模式不用管，那一段照旧可用。
+strip_clash_api() {
+	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { echo '{"ok":true,"message":"no_config"}'; return 0; }
+	grep -q '^[[:space:]]*clash_api[[:space:]]*{' /etc/honk/config.dae || { echo '{"ok":true,"message":"no_clash_api"}'; return 0; }
+	tmp=$(mktemp /etc/honk/.config.dae.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	awk '
+		/^[[:space:]]*clash_api[[:space:]]*\{/ { skip = 1; next }
+		skip && /^[[:space:]]*\}[[:space:]]*$/ { skip = 0; next }
+		skip { next }
+		{ print }
+	' /etc/honk/config.dae > "$tmp" || { rm -f "$tmp"; echo '{"ok":false,"message":"config_invalid"}'; return 1; }
+	grep -q '^[[:space:]]*clash_api[[:space:]]*{' "$tmp" && { rm -f "$tmp"; echo '{"ok":false,"message":"config_invalid"}'; return 1; }
+	cp -p /etc/honk/config.dae /etc/honk/.config-before-strip.dae 2>/dev/null || :
+	chmod 0600 "$tmp" && mv -f "$tmp" /etc/honk/config.dae || { rm -f "$tmp"; echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
+	logger -t honk "the clash_api block was removed from the main config; the db store mode does not allow it"
+	echo '{"ok":true,"message":"clash_api_removed"}'
+}
 
 geodata_sources() {
 	db=/etc/honk/state/honk.db
@@ -1703,11 +1665,11 @@ case "$1" in
 	migrate)
 		migrate_geodata_assets
 		;;
-	sync-db)
-		sync_db_revisions
-		;;
 	geodata-sources)
 		geodata_sources
+		;;
+	strip-clash-api)
+		strip_clash_api
 		;;
 	geodata-files)
 		geodata_files
@@ -1738,7 +1700,7 @@ case "$1" in
 		recover
 		;;
 	*)
-		echo "usage: $0 {check|diagnose|preflight|local-direct|local-direct-file|migrate|sync-db|geodata-sources|geodata-files|geodata-status|initialize|settings|repair|detach|recover|write-system|panel-managed}" >&2
+		echo "usage: $0 {check|diagnose|preflight|local-direct|local-direct-file|migrate|geodata-sources|strip-clash-api|geodata-files|geodata-status|initialize|settings|repair|detach|recover|write-system|panel-managed}" >&2
 		exit 2
 		;;
 esac
