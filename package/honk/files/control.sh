@@ -1248,7 +1248,10 @@ api_discovery() {
 mock_start() {
 	mock_config=$1
 	mock_log=$2
-	DAE_LOCATION_ASSET=/usr/share/v2ray "$HONK_CORE" --config "$mock_config" --mock-ebpf > "$mock_log" 2>&1 &
+	# MOCK_CORE_ARGS 带上存储模式与数据目录（只有「只补管理员」那条路需要）；
+	# 上游的首装流程走文件存储 + 临时目录，所以那里它是空的。
+	# shellcheck disable=SC2086
+	DAE_LOCATION_ASSET=/usr/share/v2ray "$HONK_CORE" --config "$mock_config" ${MOCK_CORE_ARGS:-} --mock-ebpf > "$mock_log" 2>&1 &
 	mock_pid=$!
 	mock_identity=""
 	attempt=0
@@ -1301,13 +1304,17 @@ post_credentials() {
 
 initialize_preflight() {
 	load_settings
-	[ "$enabled" = 0 ] && [ "$initialized" = 0 ] || { echo '{"ok":false,"message":"disable_service_before_initialization"}'; return 1; }
+	[ "$enabled" = 0 ] || { echo '{"ok":false,"message":"disable_service_before_initialization"}'; return 1; }
 	[ "$config_file" = /etc/honk/config.dae ] || { echo '{"ok":false,"message":"invalid_config_path"}'; return 1; }
 	[ -f /usr/share/honk/default-config.dae ] && [ ! -L /usr/share/honk/default-config.dae ] || { echo '{"ok":false,"message":"default_config_unavailable"}'; return 1; }
 	[ -r /usr/share/doona/index.html ] || { echo '{"ok":false,"message":"ui_assets_missing"}'; return 1; }
 	if [ "$1" = read_credentials ]; then
 		read_credentials || { echo '{"ok":false,"message":"invalid_credentials"}'; return 1; }
 	fi
+	# initialized=1：服务已经配置过，只是状态库里的管理员记录没了。这种情况走
+	# 「只补管理员」那条路（见 initialize_admin_only）：它不改配置，也不要求配置
+	# 等于随包模板，它自己会把该做的检查再做一遍。
+	[ "$initialized" = 0 ] || return 0
 	[ -x "$HONK_CORE" ] || { echo '{"ok":false,"message":"core_missing"}'; return 1; }
 	command -v curl >/dev/null 2>&1 || { echo '{"ok":false,"message":"curl_missing"}'; return 1; }
 	pidof honk-core >/dev/null 2>&1 && { echo '{"ok":false,"message":"core_already_running"}'; return 1; }
@@ -1397,6 +1404,127 @@ render_initial_config() {
 	' "${4:-/etc/honk/config.dae}"
 }
 
+# 只补管理员，不改配置。
+#
+# 场景：服务已经配置过（UCI initialized=1），但状态库里的管理员记录没了
+# （升级后状态库被重建，或有人清过库）。面板（Doona）会要求「新建管理员」，
+# 而首装流程会拒绝：它的前提是「配置就是随包模板」，而且它会把配置整个重写
+# 一遍——对一个已经在用的配置这么做是不该的。
+#
+# 核心没有 admin create，唯一受支持的做法是起一个核心实例跑一次
+# /api/v1/auth/setup。管理员记录落在 <data_dir>/state/honk.db（file 与 db 两种
+# 存储模式都是如此，实测过），所以这里用一份最小配置起核心、数据目录指向真
+# 实的那份：管理员写进真实的状态库，配置文件一个字节都不改。db 存储模式下
+# 状态库的 head 才是权威，配置文件的差异不会被写成新修订（实测过）。
+initialize_admin_only() {
+	[ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ] && { echo '{"ok":false,"message":"update_recovery_required"}'; return 1; }
+	. /usr/share/libubox/jshn.sh || return 1
+	load_settings
+	read_credentials || { echo '{"ok":false,"message":"invalid_credentials"}'; return 1; }
+	[ -x "$HONK_CORE" ] || { echo '{"ok":false,"message":"core_missing"}'; return 1; }
+	command -v curl >/dev/null 2>&1 || { echo '{"ok":false,"message":"curl_missing"}'; return 1; }
+	pidof honk-core >/dev/null 2>&1 && { echo '{"ok":false,"message":"core_already_running"}'; return 1; }
+	[ -f "$config_file" ] && [ ! -L "$config_file" ] || { echo '{"ok":false,"message":"main_config_unavailable"}'; return 1; }
+	check_config || { echo '{"ok":false,"message":"invalid_package_config"}'; return 1; }
+	case "$listen_port" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
+	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || { echo '{"ok":false,"message":"invalid_listen_port"}'; return 1; }
+	check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
+
+	umask 077
+	temp_dir=$(mktemp -d /tmp/honk-admin.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
+	mock_pid=""
+	trap cleanup_admin_only 0
+	trap 'exit 1' HUP INT TERM
+
+	# 数据目录取配置里的 data_dir；核心要求 --data-dir 与 global.data_dir 一致。
+	data_dir=$(sed -n "s/^[[:space:]]*data_dir:[[:space:]]*'\([^']*\)'.*/\1/p" "$config_file" 2>/dev/null | head -n 1)
+	[ -n "$data_dir" ] || data_dir=/etc/honk
+	case "$data_dir" in /*) ;; *) data_dir=/etc/honk ;; esac
+
+	mock_config=$temp_dir/admin.dae
+	mock_log=$temp_dir/core.log
+	response_file=$temp_dir/response.json
+	cat > "$mock_config" <<EOF
+global {
+    wan_interface: auto
+    lan_interface: ''
+    data_dir: '$data_dir'
+    nfqueue_enable: false
+    store_subscribe: false
+}
+experimental {
+    native_api {
+        enabled: true
+        listen: '127.0.0.1:$listen_port'
+        password_auth: true
+        allow_anonymous_loopback: false
+        config_write: true
+    }
+}
+EOF
+	chmod 0600 "$mock_config" 2>/dev/null || true
+
+	# 用文件存储起核心，数据目录指向真实的那份：管理员记录落在
+	# <data_dir>/state/honk.db（两种存储模式都是这个库，实测过），db 存储模式
+	# 下的修订历史不受影响（实测过）。
+	# 这里不能加 --store db：那种模式下核心的监听地址取自状态库里的修订，
+	# mock 配置里的回环地址会被忽略，认证请求就发不到正确的地址上（实测过）。
+	MOCK_CORE_ARGS="--data-dir $data_dir"
+
+	# 这条路不许改配置文件：记下它的样子，结束时核对。
+	config_hash_before=$(sha256sum "$config_file" | awk '{print $1}')
+
+	loopback_url="http://127.0.0.1:$listen_port"
+	if ! mock_start "$mock_config" "$mock_log" "$loopback_url" "$response_file"; then
+		echo '{"ok":false,"message":"mock_core_start_failed"}'
+		return 1
+	fi
+	setup_required=$(jsonfilter -i "$response_file" -e '@.auth.setup_required' 2>/dev/null)
+	case "$setup_required" in
+	true)
+		status=$(post_credentials "$loopback_url/api/v1/auth/setup" "$response_file")
+		[ "$status" = 201 ] || { mock_stop; echo '{"ok":false,"message":"administrator_setup_failed"}'; return 1; }
+		;;
+	false)
+		status=$(post_credentials "$loopback_url/api/v1/auth/login" "$response_file")
+		[ "$status" = 200 ] || { mock_stop; echo '{"ok":false,"message":"administrator_exists_reuse_credentials_or_reset_state"}'; return 1; }
+		;;
+	*)
+		mock_stop
+		echo '{"ok":false,"message":"native_api_setup_state_unavailable"}'
+		return 1
+		;;
+	esac
+	mock_stop || { echo '{"ok":false,"message":"mock_core_stop_failed"}'; return 1; }
+
+	# 再起一次确认管理员真的落库了：重启之后核心不再要求新建。
+	if ! mock_start "$mock_config" "$mock_log" "$loopback_url" "$response_file"; then
+		echo '{"ok":false,"message":"mock_core_restart_failed"}'
+		return 1
+	fi
+	setup_required=$(jsonfilter -i "$response_file" -e '@.auth.setup_required' 2>/dev/null)
+	[ "$setup_required" = false ] || { mock_stop; echo '{"ok":false,"message":"setup_verification_failed"}'; return 1; }
+	mock_stop || { echo '{"ok":false,"message":"mock_core_stop_failed"}'; return 1; }
+
+	config_hash_after=$(sha256sum "$config_file" | awk '{print $1}')
+	if [ "$config_hash_after" != "$config_hash_before" ]; then
+		logger -t honk "the administrator setup changed the configuration file"
+		echo '{"ok":false,"message":"main_config_changed_concurrently"}'
+		return 1
+	fi
+	password=""
+	username=""
+	echo '{"ok":true,"message":"administrator_initialized"}'
+}
+
+cleanup_admin_only() {
+	if mock_stop >/dev/null 2>&1; then
+		rm -rf "$temp_dir" 2>/dev/null
+	else
+		logger -t honk "the administrator setup could not stop the core; keeping the temporary files"
+	fi
+}
+
 initialize() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
 	. /usr/share/libubox/jshn.sh || return 1
@@ -1404,6 +1532,13 @@ initialize() {
 	honk_lock_acquire || { echo '{"ok":false,"message":"operation_in_progress"}'; return 1; }
 	trap 'honk_lock_release >/dev/null 2>&1' 0
 	initialize_preflight || return 1
+
+	# 服务已经配置过（initialized=1）而管理员记录丢了：只补管理员，不动配置。
+	# 上游的首装流程会把配置整个重写一遍，对一个已经在用的配置做这件事不该发生。
+	if [ "$initialized" = 1 ]; then
+		initialize_admin_only
+		return $?
+	fi
 
 	umask 077
 	temp_dir=$(mktemp -d /tmp/honk-init.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
