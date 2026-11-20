@@ -452,37 +452,155 @@ sync_db() {
 	mode=${1:-import}
 	db=/etc/honk/state/honk.db
 	[ -f "$db" ] && [ ! -L "$db" ] || { echo '{"ok":true,"message":"state_database_absent"}'; return 0; }
-	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { echo '{"ok":true,"message":"main_config_absent"}'; return 0; }
 	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
 	# 核心在跑的时候不动它的库：它手里的是启动时读进去的修订。
 	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
-	file_sha=$(sha256sum /etc/honk/config.dae | awk '{print $1}')
-	file_bytes=$(wc -c < /etc/honk/config.dae | tr -d ' ')
-	stored_sha=$(sqlite3 "$db" "SELECT r.content_sha256 FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1;" 2>/dev/null)
 	case "$mode" in
-	import)
-		[ "$file_sha" = "$stored_sha" ] && { echo '{"ok":true,"message":"already_in_sync"}'; return 0; }
-		new_number=$(sqlite3 "$db" "INSERT INTO revision (parent, created_at, principal, origin, root, sources, content_sha256, bytes) SELECT (SELECT number FROM head WHERE id = 1), unixepoch(), 'package', 'import', '/etc/honk', json_array(json_object('name','config.dae','parent',NULL,'content',CAST(readfile('/etc/honk/config.dae') AS TEXT))), '$file_sha', $file_bytes; SELECT last_insert_rowid();" 2>/dev/null)
-		case "$new_number" in ''|*[!0-9]*) echo '{"ok":false,"message":"revision_not_stored"}'; return 1 ;; esac
-		sqlite3 "$db" "UPDATE head SET active = $new_number WHERE id = 1;" 2>/dev/null || { echo '{"ok":false,"message":"revision_not_stored"}'; return 1; }
-		logger -t honk "the configuration file was imported into the state database as revision $new_number"
-		echo '{"ok":true,"message":"config_imported"}'
-		;;
-	mirror)
-		[ "$file_sha" = "$stored_sha" ] && { echo '{"ok":true,"message":"already_in_sync"}'; return 0; }
-		content=$(sqlite3 "$db" "SELECT json_extract(sources, '\$[0].content') FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1;" 2>/dev/null)
-		[ -n "$content" ] || { echo '{"ok":true,"message":"no_stored_config"}'; return 0; }
-		printf '%s' "$content" > /etc/honk/.config-mirror.tmp 2>/dev/null || { echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
-		chmod 0600 /etc/honk/.config-mirror.tmp 2>/dev/null || :
-		mv -f /etc/honk/.config-mirror.tmp /etc/honk/config.dae 2>/dev/null || { rm -f /etc/honk/.config-mirror.tmp; echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
-		logger -t honk "the configuration file was refreshed from the state database"
-		echo '{"ok":true,"message":"config_mirrored"}'
-		;;
-	*)
-		echo '{"ok":false,"message":"unknown_sync_mode"}'
-		return 1
-		;;
+	import) honk_db_import "$db" ;;
+	mirror) honk_db_mirror "$db" ;;
+	*) echo '{"ok":false,"message":"unknown_sync_mode"}'; return 1 ;;
 	esac
+}
+
+# 把配置文件写进状态库，作为一条新的修订（旧修订留着，面板的修订历史就是
+# 它们）。
+#
+# 行的写法照着核心来（crates/honk-core/src/native_api/store/db.rs，固定版本
+# 64848881）：核心加载的时候一条一条核对，对不上就是 StoreError::Corrupt，
+# 核心连启动都不肯，修订列表也一样。
+#   - sources 是一个 JSON 数组，每个元素四个字段（name、parent、content、
+#     sha256），少一个多一个核心都当损坏（deny_unknown_fields）。
+#   - name 是相对 root 的文件名，扩展名得是 .dae（核心的 valid_name）。
+#   - parent 第一个是 null（我们只有一个文件）。
+#   - content 是文件内容，sha256 是它的哈希（核心的 digest）。
+#   - content_sha256 是这段 sources JSON 文本自己的哈希 —— 核心每次加载都
+#     拿它和 sources 的哈希比。
+#   - bytes 是各个 content 的字节数之和，也就是文件本身的大小。
+#   - root 是数据目录，核心按 root + name 找文件。
+#   - origin 只能是 import / write / activate，这里是 import。
+# 插入、移动 head、裁剪在一个事务里（核心的 promote 就是这样）：head 在
+# 事务里读，它动不了。裁剪按核心的上限：50 条修订、16 MiB 的 sources。
+honk_db_import() {
+	db=$1
+	file=/etc/honk/config.dae
+	[ -f "$file" ] && [ ! -L "$file" ] || { echo '{"ok":true,"message":"main_config_absent"}'; return 0; }
+	root=$(sed -n "s/^[[:space:]]*data_dir:[[:space:]]*'\([^']*\)'.*/\1/p" "$file" 2>/dev/null | head -n 1)
+	[ -n "$root" ] || root=/etc/honk
+	case "$root" in /*) ;; *) root=/etc/honk ;; esac
+	name=${file##*/}
+	# 名字要相对 root，扩展名得是 .dae。
+	case "$root/$name" in
+	"$file") ;;
+	*) echo '{"ok":false,"message":"config_outside_data_dir"}'; return 1 ;;
+	esac
+	case "$name" in
+	*.dae) ;;
+	*) echo '{"ok":false,"message":"config_name_invalid"}'; return 1 ;;
+	esac
+	# 取一份快照：后面每一步都从它读，文件中途被改也不会让两个哈希对不上。
+	snap=/tmp/honk-import.dae
+	rm -f "$snap"
+	cp -f "$file" "$snap" 2>/dev/null || { echo '{"ok":false,"message":"config_read_failed"}'; return 1; }
+	chmod 0600 "$snap" 2>/dev/null || :
+	file_sha=$(sha256sum "$snap" 2>/dev/null | awk '{print $1}')
+	file_bytes=$(wc -c < "$snap" 2>/dev/null | tr -d ' ')
+	case "$file_sha" in
+	''|*[!0-9a-f]*) echo '{"ok":false,"message":"config_read_failed"}'; return 1 ;;
+	esac
+	case "$file_bytes" in
+	''|*[!0-9]*) echo '{"ok":false,"message":"config_read_failed"}'; return 1 ;;
+	esac
+	# 核心存进去的 content 是读出来的文本：文件不是合法的 UTF-8（或者中间
+	# 有 NUL）时，长度和文件本身对不上，核心会算成损坏。
+	text_bytes=$(sqlite3 "$db" "SELECT length(CAST(CAST(readfile('$snap') AS TEXT) AS BLOB));" 2>/dev/null)
+	[ "$text_bytes" = "$file_bytes" ] || { rm -f "$snap"; echo '{"ok":false,"message":"config_not_utf8"}'; return 1; }
+	nul_count=$(od -An -tx1 "$snap" 2>/dev/null | tr ' ' '\n' | grep -c '^00$')
+	[ "$nul_count" = 0 ] || { rm -f "$snap"; echo '{"ok":false,"message":"config_not_utf8"}'; return 1; }
+	# 库里生效的那条已经就是这份文件时，不用再写一条修订。
+	stored_file_sha=$(sqlite3 "$db" "SELECT json_extract(r.sources,'\$[0].sha256') FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1;" 2>/dev/null)
+	if [ -n "$stored_file_sha" ] && [ "$stored_file_sha" = "$file_sha" ]; then
+		rm -f "$snap"
+		echo '{"ok":true,"message":"already_in_sync"}'
+		return 0
+	fi
+	# sources 的文本让 sqlite 自己拼：转义（引号、反斜杠、换行）交给它，
+	# 省得我们拼出一个核心读不回来的 JSON。
+	sources_sql="json_array(json_object('name','$name','parent',NULL,'content',CAST(readfile('$snap') AS TEXT),'sha256','$file_sha'))"
+	sources=$(sqlite3 "$db" "SELECT $sources_sql;" 2>/dev/null)
+	case "$sources" in
+	\[*) ;;
+	*) rm -f "$snap"; echo '{"ok":false,"message":"revision_not_stored"}'; return 1 ;;
+	esac
+	# content_sha256 是这段 sources 文本自己的哈希。
+	sources_sha=$(printf '%s' "$sources" | sha256sum | awk '{print $1}')
+	# quote() 把它变成 SQL 里安全的字面量：里面的单引号会被加倍，存进去
+	# 还是原来那一个字节不差的文本。
+	literal=$(sqlite3 "$db" "SELECT quote($sources_sql);" 2>/dev/null)
+	case "$literal" in
+	\'*) ;;
+	*) rm -f "$snap"; echo '{"ok":false,"message":"revision_not_stored"}'; return 1 ;;
+	esac
+	rm -f "$snap"
+	sqlite3 -bail "$db" <<SQL >/dev/null 2>&1
+BEGIN IMMEDIATE;
+INSERT INTO revision (parent, created_at, principal, origin, root, sources, content_sha256, bytes)
+VALUES ((SELECT active FROM head WHERE id = 1), unixepoch(), 'package', 'import', '$root', $literal, '$sources_sha', $file_bytes);
+INSERT INTO head (id, active) VALUES (1, last_insert_rowid()) ON CONFLICT(id) DO UPDATE SET active = excluded.active;
+DELETE FROM revision
+ WHERE number != (SELECT active FROM head WHERE id = 1)
+   AND number IN (
+     SELECT number FROM (
+       SELECT number,
+              MAX(CASE WHEN rn > 50 OR cum > 16777216 THEN 1 ELSE 0 END)
+                OVER (ORDER BY number DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS full
+         FROM (
+           SELECT number,
+                  ROW_NUMBER() OVER (ORDER BY number DESC) AS rn,
+                  SUM(octet_length(sources)) OVER (ORDER BY number DESC) AS cum
+             FROM revision
+         )
+     ) WHERE full = 1
+   );
+COMMIT;
+SQL
+	new_number=$(sqlite3 "$db" "SELECT active FROM head WHERE id = 1;" 2>/dev/null)
+	case "$new_number" in
+	''|*[!0-9]*) echo '{"ok":false,"message":"revision_not_stored"}'; return 1 ;;
+	esac
+	# 再核对一次：库里的 sources 文本和它自己的哈希必须对得上，对不上核心
+	# 不会读这一条。这种情况把这一条撤掉，head 退回上一条。
+	stored_sources=$(sqlite3 "$db" "SELECT sources FROM revision WHERE number = $new_number;" 2>/dev/null)
+	stored_sha=$(printf '%s' "$stored_sources" | sha256sum | awk '{print $1}')
+	if [ "$stored_sha" != "$sources_sha" ]; then
+		sqlite3 -bail "$db" "BEGIN IMMEDIATE;
+UPDATE head SET active = (SELECT parent FROM revision WHERE number = $new_number) WHERE id = 1 AND EXISTS (SELECT 1 FROM revision WHERE number = (SELECT parent FROM revision WHERE number = $new_number));
+DELETE FROM head WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM revision WHERE number = (SELECT parent FROM revision WHERE number = $new_number));
+DELETE FROM revision WHERE number = $new_number;
+COMMIT;" >/dev/null 2>&1 || :
+		echo '{"ok":false,"message":"revision_not_stored"}'
+		return 1
+	fi
+	logger -t honk "the configuration file was imported into the state database as revision $new_number"
+	echo '{"ok":true,"message":"config_imported"}'
+}
+
+# 把库里生效的那份写回文件（文件是库的镜像）。
+# 命令替换会吃掉末尾的换行，核心写文件时是保留的 —— 这里用 writefile 写
+# 原样的内容，末尾的换行跟着走。
+honk_db_mirror() {
+	db=$1
+	file=/etc/honk/config.dae
+	[ -f "$file" ] && [ ! -L "$file" ] || { echo '{"ok":true,"message":"main_config_absent"}'; return 0; }
+	stored=$(sqlite3 "$db" "SELECT count(*) FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1 AND json_extract(r.sources,'\$[0].sha256') IS NOT NULL;" 2>/dev/null)
+	[ "$stored" = 1 ] || { echo '{"ok":true,"message":"no_stored_config"}'; return 0; }
+	tmp=/tmp/honk-mirror.dae
+	rm -f "$tmp"
+	sqlite3 -bail "$db" "SELECT writefile('$tmp', json_extract(r.sources,'\$[0].content')) FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1;" >/dev/null 2>&1 || { rm -f "$tmp"; echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
+	[ -f "$tmp" ] || { echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
+	chmod 0600 "$tmp" 2>/dev/null || :
+	mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
+	logger -t honk "the configuration file was refreshed from the state database"
+	echo '{"ok":true,"message":"config_mirrored"}'
 }
 
 geodata_sources() {
@@ -492,10 +610,10 @@ geodata_sources() {
 	# 下次启动才生效。
 	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
 	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
-	# 下载出口：不写。核心的直连出口要走 global.bootstrap_resolver，而核心把它
-	# 当作 ip:port 解析：上游模板里那个 1.1.1.1 没有端口，解析不过，直连这条路
-	# 直接报 bootstrap_unavailable（实测）。出口交给路由规则或者用户在面板里
-	# 选的那一份，库里存着的也不动。
+	# 下载出口：不写。核心的直连出口用 global.bootstrap_resolver 解析下载目标
+	# 的域名（上游模板给的是 1.1.1.1:53 这样的公网解析器），在我们这边这条
+	# 路靠不住，所以出口交给路由规则或者用户在面板里选的那一份，库里存着的
+	# 也不动。
 	record=$(sqlite3 "$db" 'SELECT record FROM geodata_settings WHERE id=1;' 2>/dev/null)
 	# 库里留着的地址：我们写的那份混着两个来源（MetaCubeX + Loyalsoldier）要清掉
 	# —— 面板的下拉按来源匹配，混着它认不出来，会落回「自定义」把四个地址一
@@ -915,7 +1033,7 @@ settings() {
 	json_get_type store_type store
 	# 存储模式只有 db 与 file 两种；没有这一项就保持当前的值，不写空。
 	case "$store_type" in
-	''|null) new_store=$store ;;
+	''|null) new_store=$store_mode ;;
 	string) case "$new_store" in db|file) ;; *) echo '{"ok":false,"message":"invalid_store_mode"}'; return 1 ;; esac ;;
 	*) echo '{"ok":false,"message":"invalid_store_mode"}'; return 1 ;;
 	esac

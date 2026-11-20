@@ -60,8 +60,10 @@ validate_with_core() {
 	cp "$cand" "$tmpdir/$type.dat" 2>/dev/null || { rm -rf "$tmpdir"; return 1; }
 	other=geoip
 	[ "$type" = geoip ] && other=geosite
+	# 当前那份先放进来，软件包带的那份只补上缺的那一个：后者不能盖掉前者
+	# （当前那份才是设备正在用的规则集）。
 	[ -f "/etc/honk/$other.dat" ] && cp "/etc/honk/$other.dat" "$tmpdir/" 2>/dev/null
-	[ -f "/usr/share/v2ray/$other.dat" ] && cp "/usr/share/v2ray/$other.dat" "$tmpdir/" 2>/dev/null
+	[ -f "/usr/share/v2ray/$other.dat" ] && [ ! -f "$tmpdir/$other.dat" ] && cp "/usr/share/v2ray/$other.dat" "$tmpdir/" 2>/dev/null
 	DAE_LOCATION_ASSET="$tmpdir" /usr/bin/honk-core config validate --config /etc/honk/config.dae >/dev/null 2>&1
 	rc=$?
 	rm -rf "$tmpdir"

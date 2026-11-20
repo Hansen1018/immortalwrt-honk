@@ -1793,3 +1793,9 @@ msgstr "请输入订阅名称。"
 
 msgid "Storage mode"
 msgstr "存储模式"
+
+msgid "Database (the panel keeps the import and the revision history)"
+msgstr "数据库（面板保留导入和修订历史）"
+
+msgid "File (the configuration file is the only truth)"
+msgstr "文件（配置文件是唯一的真相）"
