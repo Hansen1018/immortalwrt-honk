@@ -441,9 +441,10 @@ geodata_sources() {
 	# 下次启动才生效。
 	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
 	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
-	# 下载出口：这些地址不需要代理（清单里第一个是 CDN，墙内直连也通），所以默认
-	# 写直连。用户在面板里改过出口（库里存着的）就不动，那是他的选择。
-	route_stored=$(sqlite3 "$db" "SELECT coalesce(json_type(record, '\$.download'), 'null') FROM geodata_settings WHERE id=1;" 2>/dev/null)
+	# 下载出口：不写。核心的直连出口要走 global.bootstrap_resolver，而核心把它
+	# 当作 ip:port 解析：上游模板里那个 1.1.1.1 没有端口，解析不过，直连这条路
+	# 直接报 bootstrap_unavailable（实测）。出口交给路由规则或者用户在面板里
+	# 选的那一份，库里存着的也不动。
 	record=$(sqlite3 "$db" 'SELECT record FROM geodata_settings WHERE id=1;' 2>/dev/null)
 	# 库里留着的地址：我们写的那份混着两个来源（MetaCubeX + Loyalsoldier）要清掉
 	# —— 面板的下拉按来源匹配，混着它认不出来，会落回「自定义」把四个地址一
@@ -487,12 +488,6 @@ geodata_sources() {
 	# 要改的字段
 	sets=''
 	[ -n "$urls" ] && sets="'\$.urls', json('$urls')"
-	# 出口：库里没有存过的时候写直连。存着的就不动 —— 那是用户在面板里选的。
-	download_part="'\$.download', json('{\"route\":{\"route\":\"direct\"}}')"
-	if [ "$route_stored" != object ]; then
-		[ -n "$sets" ] && sets="$sets, "
-		sets="$sets$download_part"
-	fi
 	if [ -n "$sets" ]; then
 		if ! sqlite3 "$db" "UPDATE geodata_settings SET record = json_set(CASE WHEN json_valid(record) THEN record ELSE '{}' END, $sets) WHERE id = 1;" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
@@ -502,7 +497,7 @@ geodata_sources() {
 	if [ "$(sqlite3 "$db" 'SELECT count(*) FROM geodata_settings WHERE id=1;' 2>/dev/null)" != 1 ]; then
 		row="$(geodata_default_list_json)"
 		[ -n "$(geodata_configured_url)" ] && row="$urls"
-		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row'), 'download', json('{\"route\":{\"route\":\"direct\"}}')));" >/dev/null 2>&1; then
+		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row')));" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
 			return 1
 		fi

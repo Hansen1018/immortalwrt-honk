@@ -38,16 +38,26 @@ honk_geodata_strip() {
 }
 
 
-# 地理数据的下载源列表：默认那一份（Loyalsoldier/v2ray-rules-dat 的 jsDelivr
-# 镜像与 raw 备用地址），和软件包带的那两份文件同源。
+# 地理数据的下载源列表：默认那一份 —— Loyalsoldier/v2ray-rules-dat 的
+# jsDelivr 镜像与 raw 备用地址，地址顺序是 CDN 在前、raw 在后。
+#
+# 为什么是这一份（实测）：
+#   * 核心更新时会检查新文件是否定义了规则用到的每一个分类，缺一个就拒绝那份
+#     文件（面板报「新的地理数据文件未通过校验」）。随包带的那两份文件
+#     （v2ray-geodata 的 v2fly domain-list-community 与 v2fly geoip）缺
+#     apple-cn、category-ai-cn 这些分类，而规则里写着它们 —— 拿它们当下载源，
+#     更新会被核心拒掉。这一份（和核心内置的 MetaCubeX 那份一样）分类齐全，
+#     核心读得进去（实测：载入时没有一条告警）。
+#   * v2fly 自己的发布地址会 302 重定向，核心不跟随重定向，所以不用它。
+#   * 面板的内置清单也是 MetaCubeX（core 的内置列表）那一份，分类同样齐全；
+#     两份都可用，这里保持 Loyalsoldier：面板下拉里它是一个来源名（tag），
+#     刷新清单时来源不变，认得出是哪个来源。
 #
 # 面板的下拉是按「来源」（它那边叫 tag）匹配的：metacubex / metacubex-lite /
 # loyalsoldier。一个列表只能是一个来源：混着两个来源它认不出来，会落回
 # 「自定义」把几个地址一起塞进去；兜底时还可能换到另一份规则集（分类对不
-# 上，更新会被核心拒掉）。
-#
-# 所以这里一份清单就是一个来源的镜像组：一个不通就换下一个 —— 拿到的始终是同一份
-# 文件（同一份规则集，分类才对得上）。
+# 上，更新会被核心拒掉）。所以这里一份清单就是一个来源的镜像组：一个不通就换
+# 下一个 —— 拿到的始终是同一份文件（同一份规则集，分类才对得上）。
 #
 # 镜像的顺序：jsDelivr 的 CDN 在前、raw 在后。CDN 在墙内直连也通（走代理也通），
 # raw.githubusercontent.com 在墙内是不通的，DNS 也可能被污染 —— 放在前面只会白等
@@ -59,13 +69,6 @@ honk_geodata_strip() {
 #
 # honk_geodata_sources <geosite|geoip>
 #   默认那一份的地址，一个一行，按顺序。
-#
-#   默认是 Loyalsoldier/v2ray-rules-dat：它和软件包带的那两份文件
-#   （v2ray-geodata 的 v2fly domain-list-community 与 v2fly geoip）是同一份
-#   数据（外加 @cn 这些属性）。核心更新时会检查新文件是否定义了规则用到的每一个
-#   分类，缺一个就拒绝那份文件并沿用当前的（面板报「新的地理数据文件未通过校
-#   验」）。所以下载的来源要和规则对着写的那份文件同源，否则更新会被拒。
-#   v2fly 自己的发布地址会 302 重定向，核心不跟随重定向，所以用这一份。
 honk_geodata_sources() {
 	case "$1" in
 	geosite)
