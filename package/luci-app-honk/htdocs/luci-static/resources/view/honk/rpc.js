@@ -304,7 +304,6 @@ function tokenMessage(token) {
 		config_merge_source_changed: _('A source file changed. Refresh the merge preview.'),
 		config_merge_preview_changed: _('The merged candidate changed. Refresh the preview.'),
 		system_config_not_included: _('The active configuration no longer uses system.dae. Edit config.dae instead.'),
-		store_authorized: _('The revision history bridge is authorized.'),
 		system_config_healthy: _('System check passed.'),
 		system_config_repaired: _('Repair completed.'),
 		backup_created: _('Backup created.'),

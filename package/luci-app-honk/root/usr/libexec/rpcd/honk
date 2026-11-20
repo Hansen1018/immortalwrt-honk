@@ -550,7 +550,7 @@ experimental {
     }
 }
 EOF
-	DAE_LOCATION_ASSET=/etc/honk "$CORE" --config "$temp/config.dae" --mock-ebpf \
+	DAE_LOCATION_ASSET="$temp" "$CORE" --config "$temp/config.dae" --mock-ebpf \
 		--data-dir "$temp" --log-file "$temp/core.log" > "$temp/core.console" 2>&1 &
 	core_pid=$!
 	ready=0
@@ -1210,6 +1210,10 @@ initialize_account() {
 	if [ "$result" = 0 ] && { [ "$was_running" = 1 ] || [ "$old_enabled" = 1 ]; }; then
 		set_enabled "$old_enabled" || :
 		honk_lifecycle_start 30 || :
+	elif [ "$old_enabled" = 1 ]; then
+		# 失败也要把服务恢复原样：不能一次失败的设置把服务留在关着的状态。
+		set_enabled 1 || :
+		honk_lifecycle_start 30 || :
 	fi
 	return $result
 }
@@ -1646,8 +1650,9 @@ config_apply_candidate() {
 		apply_failed=0
 	fi
 	# db 模式：核心跑的是状态库里的修订，文件改了要重新导入才生效。
-	# 服务此刻是停着的（上面刚停过），清修订是安全的。
-	[ "$apply_failed" = 0 ] && "$CONTROL" sync-db >/dev/null 2>&1 || :
+	# 服务此刻是停着的（上面刚停过），导入是安全的：写一条新的修订，旧的修订
+	# 留着（面板的修订历史就是它们）。
+	[ "$apply_failed" = 0 ] && "$CONTROL" sync-db import >/dev/null 2>&1 || :
 	if [ "$apply_failed" = 0 ] && honk_lifecycle_start 20; then
 		rm -rf "$backup_dir"
 		emit_result true config_applied

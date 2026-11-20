@@ -1227,5 +1227,7 @@ case "$1" in
 	restore) restore ;;
 	reset) reset_data "$2" "$3" ;;
 	recover) recover_action ;;
+	checkpoint) checkpoint_state ;;
+	checkpoint) checkpoint_state ;;
 	*) error invalid_action ;;
 esac

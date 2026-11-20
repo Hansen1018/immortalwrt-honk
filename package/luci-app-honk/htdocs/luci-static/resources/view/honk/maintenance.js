@@ -222,7 +222,6 @@ return view.extend({
 			const preset0 = (function() {
 				if (!gi0 && !gs0) return 'loyalsoldier';
 				for (const id of Object.keys(GEO_PRESETS)) {
-					if (id === 'loyalsoldier') continue;
 					const preset = GEO_PRESETS[id];
 					if (gi0 === preset.geoip && gs0 === preset.geosite) return id;
 				}

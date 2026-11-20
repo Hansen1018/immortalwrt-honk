@@ -423,15 +423,66 @@ strip_clash_api() {
 	tmp=$(mktemp /etc/honk/.config.dae.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
 	awk '
 		/^[[:space:]]*clash_api[[:space:]]*\{/ { skip = 1; next }
-		skip && /^[[:space:]]*\}[[:space:]]*$/ { skip = 0; next }
+		skip && /^[[:space:]]*\}[[:space:]]*(#.*)?$/ { skip = 0; next }
 		skip { next }
 		{ print }
 	' /etc/honk/config.dae > "$tmp" || { rm -f "$tmp"; echo '{"ok":false,"message":"config_invalid"}'; return 1; }
 	grep -q '^[[:space:]]*clash_api[[:space:]]*{' "$tmp" && { rm -f "$tmp"; echo '{"ok":false,"message":"config_invalid"}'; return 1; }
+	# 删过之后的结果要核心认（migrate_geodata_assets 也是这么做的）。
+	if [ -x "$HONK_CORE" ]; then
+		"$HONK_CORE" config validate --config "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; echo '{"ok":false,"message":"config_invalid"}'; return 1; }
+	fi
 	cp -p /etc/honk/config.dae /etc/honk/.config-before-strip.dae 2>/dev/null || :
 	chmod 0600 "$tmp" && mv -f "$tmp" /etc/honk/config.dae || { rm -f "$tmp"; echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
 	logger -t honk "the clash_api block was removed from the main config; the db store mode does not allow it"
 	echo '{"ok":true,"message":"clash_api_removed"}'
+}
+
+# sync-db [import|mirror]
+#
+#   import：把 /etc/honk/config.dae 里的配置写进状态库，作为一条新的修订。
+#           旧的修订留着（面板的修订历史就是它们），只是把 head 指到新的那条。
+#           面板改完配置之后用它：文件里的改动要这样才进得了库。
+#   mirror：把状态库里当前生效的修订写回 /etc/honk/config.dae。文件是库的镜像：
+#           升级换了文件、而用户的配置在库里时，以库里的为准。
+#
+# 两个方向要分清谁改的：面板改配置走 import（文件是新的），升级换文件走 mirror
+# （库里的是用户的）。
+sync_db() {
+	mode=${1:-import}
+	db=/etc/honk/state/honk.db
+	[ -f "$db" ] && [ ! -L "$db" ] || { echo '{"ok":true,"message":"state_database_absent"}'; return 0; }
+	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { echo '{"ok":true,"message":"main_config_absent"}'; return 0; }
+	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
+	# 核心在跑的时候不动它的库：它手里的是启动时读进去的修订。
+	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
+	file_sha=$(sha256sum /etc/honk/config.dae | awk '{print $1}')
+	file_bytes=$(wc -c < /etc/honk/config.dae | tr -d ' ')
+	stored_sha=$(sqlite3 "$db" "SELECT r.content_sha256 FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1;" 2>/dev/null)
+	case "$mode" in
+	import)
+		[ "$file_sha" = "$stored_sha" ] && { echo '{"ok":true,"message":"already_in_sync"}'; return 0; }
+		new_number=$(sqlite3 "$db" "INSERT INTO revision (parent, created_at, principal, origin, root, sources, content_sha256, bytes) SELECT (SELECT number FROM head WHERE id = 1), unixepoch(), 'package', 'import', '/etc/honk', json_array(json_object('name','config.dae','parent',NULL,'content',CAST(readfile('/etc/honk/config.dae') AS TEXT))), '$file_sha', $file_bytes; SELECT last_insert_rowid();" 2>/dev/null)
+		case "$new_number" in ''|*[!0-9]*) echo '{"ok":false,"message":"revision_not_stored"}'; return 1 ;; esac
+		sqlite3 "$db" "UPDATE head SET active = $new_number WHERE id = 1;" 2>/dev/null || { echo '{"ok":false,"message":"revision_not_stored"}'; return 1; }
+		logger -t honk "the configuration file was imported into the state database as revision $new_number"
+		echo '{"ok":true,"message":"config_imported"}'
+		;;
+	mirror)
+		[ "$file_sha" = "$stored_sha" ] && { echo '{"ok":true,"message":"already_in_sync"}'; return 0; }
+		content=$(sqlite3 "$db" "SELECT json_extract(sources, '\$[0].content') FROM head h JOIN revision r ON r.number = h.active WHERE h.id = 1;" 2>/dev/null)
+		[ -n "$content" ] || { echo '{"ok":true,"message":"no_stored_config"}'; return 0; }
+		printf '%s' "$content" > /etc/honk/.config-mirror.tmp 2>/dev/null || { echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
+		chmod 0600 /etc/honk/.config-mirror.tmp 2>/dev/null || :
+		mv -f /etc/honk/.config-mirror.tmp /etc/honk/config.dae 2>/dev/null || { rm -f /etc/honk/.config-mirror.tmp; echo '{"ok":false,"message":"config_write_failed"}'; return 1; }
+		logger -t honk "the configuration file was refreshed from the state database"
+		echo '{"ok":true,"message":"config_mirrored"}'
+		;;
+	*)
+		echo '{"ok":false,"message":"unknown_sync_mode"}'
+		return 1
+		;;
+	esac
 }
 
 geodata_sources() {
@@ -612,8 +663,12 @@ prepare_runtime() {
 }
 
 geodata_files() {
+	# 资产要放在数据目录里（核心只在那里读它们）；数据目录从配置里取，不写死。
+	data_dir=$(sed -n "s/^[[:space:]]*data_dir:[[:space:]]*'\([^']*\)'.*/\1/p" /etc/honk/config.dae 2>/dev/null | head -n 1)
+	case "$data_dir" in /*) ;; *) data_dir=/etc/honk ;; esac
+	[ -d "$data_dir" ] || return 0
 	for name in geosite geoip; do
-		target="/etc/honk/$name.dat"
+		target="$data_dir/$name.dat"
 		# 已经有一份「正常的」就不用动。正常 = 真实文件且不是空壳：
 		#   符号链接 —— 核心拒绝在符号链接旁边落盘（暂存就失败，实测报的是
 		#     staging_failed / replacement_failed），更新永远替换不了；
@@ -625,9 +680,9 @@ geodata_files() {
 		fi
 		src="/usr/share/v2ray/$name.dat"
 		[ -f "$src" ] || continue
-		cp "$src" "/etc/honk/.$name.dat.new" 2>/dev/null || continue
-		chmod 0644 "/etc/honk/.$name.dat.new" 2>/dev/null || :
-		mv -f "/etc/honk/.$name.dat.new" "$target" 2>/dev/null || rm -f "/etc/honk/.$name.dat.new" 2>/dev/null
+		cp "$src" "$data_dir/.$name.dat.new" 2>/dev/null || continue
+		chmod 0644 "$data_dir/.$name.dat.new" 2>/dev/null || :
+		mv -f "$data_dir/.$name.dat.new" "$target" 2>/dev/null || rm -f "$data_dir/.$name.dat.new" 2>/dev/null
 	done
 	return 0
 }
@@ -858,6 +913,12 @@ settings() {
 	json_get_type clash_secret_type clash_api_secret
 	json_get_var new_store store
 	json_get_type store_type store
+	# 存储模式只有 db 与 file 两种；没有这一项就保持当前的值，不写空。
+	case "$store_type" in
+	''|null) new_store=$store ;;
+	string) case "$new_store" in db|file) ;; *) echo '{"ok":false,"message":"invalid_store_mode"}'; return 1 ;; esac ;;
+	*) echo '{"ok":false,"message":"invalid_store_mode"}'; return 1 ;;
+	esac
 	# boot_enabled 已内置（恒为 1），前端不再提交，缺省就按当前值处理
 	case "$boot_enabled_type" in ''|null|boolean) ;; *) echo '{"ok":false,"message":"invalid_boolean_settings"}'; return 1 ;; esac
 	case "$clash_enabled_type" in ''|null|boolean) ;; *) echo '{"ok":false,"message":"invalid_clash_api_settings"}'; return 1 ;; esac
@@ -1513,11 +1574,14 @@ EOF
 }
 
 cleanup_admin_only() {
+	# 这条路把 initialize() 的 trap 换掉了，所以锁得在这里放：不然下一次被
+	# 保护的操作只会看到 stale_operation_lock。
 	if mock_stop >/dev/null 2>&1; then
 		rm -rf "$temp_dir" 2>/dev/null
 	else
 		logger -t honk "the administrator setup could not stop the core; keeping the temporary files"
 	fi
+	honk_lock_release >/dev/null 2>&1
 }
 
 initialize() {
@@ -1527,6 +1591,10 @@ initialize() {
 	honk_lock_acquire || { echo '{"ok":false,"message":"operation_in_progress"}'; return 1; }
 	trap 'honk_lock_release >/dev/null 2>&1' 0
 	initialize_preflight || return 1
+
+	# 资产要先在数据目录里：核心校验配置时会读它们（validate_proxy_nodes 用的
+	# 也是这个目录），一份「初始化过但还没启动过」的机器上这里还没有。
+	geodata_files
 
 	# 服务已经配置过（initialized=1）而管理员记录丢了：只补管理员，不动配置。
 	# 上游的首装流程会把配置整个重写一遍，对一个已经在用的配置做这件事不该发生。
@@ -1797,6 +1865,9 @@ case "$1" in
 		;;
 	geodata-sources)
 		geodata_sources
+		;;
+	sync-db)
+		sync_db "$2"
 		;;
 	strip-clash-api)
 		strip_clash_api

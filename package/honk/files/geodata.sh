@@ -49,6 +49,9 @@ honk_geodata_strip() {
 #     更新会被核心拒掉。这一份（和核心内置的 MetaCubeX 那份一样）分类齐全，
 #     核心读得进去（实测：载入时没有一条告警）。
 #   * v2fly 自己的发布地址会 302 重定向，核心不跟随重定向，所以不用它。
+#   出口不用我们定：核心的直连出口是用 global.bootstrap_resolver 解析下载目标
+#   的域名的（上游给的是 1.1.1.1:53 这样的公网解析器），那条路在我们这边
+#   靠不住，所以出口交给路由规则，或者用户在面板里选的那一份。
 #   * 面板的内置清单也是 MetaCubeX（core 的内置列表）那一份，分类同样齐全；
 #     两份都可用，这里保持 Loyalsoldier：面板下拉里它是一个来源名（tag），
 #     刷新清单时来源不变，认得出是哪个来源。
@@ -187,5 +190,8 @@ honk_geodata_configured_list() {
 		*) url=$site ;;
 		esac
 	fi
+	# 用户填的地址要按核心自己的规则过一遍（parse_geodata_url）：不合规的地址
+	# 不能写进状态库，也不能拼进 JSON。
+	printf '%s' "$url" | grep -qE '^https?://[A-Za-z0-9._~:/?#@()*+,;=%-]+$' || return 0
 	honk_geodata_list_for "$url" "$kind"
 }

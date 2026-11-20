@@ -546,8 +546,6 @@ msgstr "Doona 面板要求新建管理员：状态库里没有管理员记录（
 msgid "The Doona panel asks you to create an administrator: the state database has no administrator record. Create it below to get the panel working again."
 msgstr "Doona 面板要求新建管理员：状态库里没有管理员记录。在下面建一个，面板就恢复正常。"
 
-msgid "Database (revisions)"
-msgstr "数据库（修订历史）"
 
 msgid "Configuration file"
 msgstr "配置文件"
@@ -1792,3 +1790,6 @@ msgstr "订阅名称，例如 MyAirport"
 
 msgid "Subscription name is required."
 msgstr "请输入订阅名称。"
+
+msgid "Storage mode"
+msgstr "存储模式"
