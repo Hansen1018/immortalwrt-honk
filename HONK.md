@@ -474,7 +474,7 @@ argv 访问不可得时，cgroup 钩子改用调用线程的 `comm`」。
 GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索、明暗主题、手机端底栏）
 和一个只读的实时仪表盘（上线状态、CPU/内存/无线/客户端、实时流量、防火墙概览）。
 
-两个包**原样**放在 `package/` 里（上游 v1.0.21，commit `f49b4f27a956`，文件与上游逐字节
+两个包**原样**放在 `package/` 里（上游 v1.1.1，commit `8729104405b8`，文件与上游逐字节
 一致）：
 
 | 包 | 作用 |
@@ -495,14 +495,27 @@ GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索
 简体中文翻译一起编进来：`luci-i18n-vantage-theme-zh-cn`（主题）与
 `luci-i18n-vantage-zh-cn`（仪表盘）。
 
-**更新到上游新版本**（把下面的 `v1.0.21` 换成目标版本）：
+**更新到上游新版本**（把下面的 `v1.1.1` 换成目标版本）：
 
 ```sh
-git clone --depth 1 --branch v1.0.21 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
+git clone --depth 1 --branch v1.1.1 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
 rm -rf package/luci-theme-vantage package/luci-app-vantage
 cp -a /tmp/vantage/luci-theme-vantage /tmp/vantage/luci-app-vantage package/
 chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
 ```
+
+上游 1.1.x 带来的变化：搜索（Ctrl+K 或 `/`）现在也能找到客户端（按名字、MAC、地址）、
+无线与网络；新增 WireGuard 磁贴（列出对端、最后一次握手距今多久、它们的流量）与端口磁贴
+（每个网口的链路、协商速率、流量和错误计数）；纯有线设备也有「流量排行」了；命名过的设备
+离线后不再从客户端列表里消失（新增离线筛选，列出未连接的已命名设备）；流量单位可以在
+「外观」里改成 Bytes/s（卡片、图表、客户端行、流量排行一起跟着变，链路和 Wi-Fi 速率仍是
+比特率，因为那是协商速率不是流量）；登录页从 HTTP 跳 HTTPS 的行为可以关掉
+（`uci set luci.main.vantage_https='stay'` 后 `uci commit luci`）。
+
+上游 1.1.0 还多发了一个**可选**附加包 `luci-app-vantage-aps`：把别的 OpenWrt 路由通过
+SSH 配对后并进仪表盘（每个接入点单独装，路由器上也要装）。它是独立的包，仪表盘没有它照常
+工作 —— 依赖方向是 aps → app —— 所以这个分支**没有**收它。上游自己的发布说明里也写作
+optional add-on。
 
 **不想要它**：把 `.config` 里的 `CONFIG_PACKAGE_luci-theme-vantage` 与
 `CONFIG_PACKAGE_luci-app-vantage` 去掉（`make defconfig` 后再编译）即可；主题包的
