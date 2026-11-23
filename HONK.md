@@ -518,11 +518,15 @@ chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
 上的设备，现在显示接入点在那里计到的速率。别的包可以给仪表盘放一块只读磁贴（实验性；按
 对方自己的权限可见，磁贴名旁边带对方的包 id）。
 
-上游还有两个**可选**附加包，这个分支都**没有**收：一个是 1.1.0 起的
-`luci-app-vantage-aps`（把别的 OpenWrt 路由通过 SSH 配对后并进仪表盘，每个接入点单独装，
-路由器上也要装），一个是 1.2.0 起的 `luci-app-vantage-traffic`（共享端口后面的设备按设备
-统计流量，实验性）。它们都是独立的包，仪表盘没有它们照常工作 —— 依赖方向是 add-on → app ——
-上游自己的发布说明里也写作 optional add-on。
+上游的 `luci-app-vantage-traffic`（1.2.0 起，实验性）这个分支**收了**：共享路由器某个网口
+的设备（交换机后面、或没配对的接入点后面）在仪表盘上按设备显示流量 —— 数据来自内核的连接
+计数，所以是「经过路由器的流量」，不是同一网段里设备之间的流量；它不加防火墙规则、不改
+sysctl、不起服务、不写配置文件，状态放在内存里的 `/var/run/vantage-traffic`。它读
+`/proc/net/nf_conntrack`，所以内核要有 `kmod-nf-conntrack`（我们镜像里本来就有 ✓）。依赖
+方向是 add-on → app（它要 1.2.0 或更新的仪表盘），所以仪表盘本身没有它也照常工作。
+
+上游另一个附加包 `luci-app-vantage-aps`（1.1.0 起，把别的 OpenWrt 路由通过 SSH 配对后并进
+仪表盘）这个分支**没有**收：它要在每个接入点上单独装，是部署选择而不是固件的一部分。
 
 **不想要它**：把 `.config` 里的 `CONFIG_PACKAGE_luci-theme-vantage` 与
 `CONFIG_PACKAGE_luci-app-vantage` 去掉（`make defconfig` 后再编译）即可；主题包的
