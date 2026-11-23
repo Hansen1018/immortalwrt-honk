@@ -474,7 +474,7 @@ argv 访问不可得时，cgroup 钩子改用调用线程的 `comm`」。
 GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索、明暗主题、手机端底栏）
 和一个只读的实时仪表盘（上线状态、CPU/内存/无线/客户端、实时流量、防火墙概览）。
 
-两个包**原样**放在 `package/` 里（上游 v1.1.1，commit `8729104405b8`，文件与上游逐字节
+两个包**原样**放在 `package/` 里（上游 v1.2.0，commit `a7ff63b715bc`，文件与上游逐字节
 一致）：
 
 | 包 | 作用 |
@@ -495,10 +495,10 @@ GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索
 简体中文翻译一起编进来：`luci-i18n-vantage-theme-zh-cn`（主题）与
 `luci-i18n-vantage-zh-cn`（仪表盘）。
 
-**更新到上游新版本**（把下面的 `v1.1.1` 换成目标版本）：
+**更新到上游新版本**（把下面的 `v1.2.0` 换成目标版本）：
 
 ```sh
-git clone --depth 1 --branch v1.1.1 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
+git clone --depth 1 --branch v1.2.0 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
 rm -rf package/luci-theme-vantage package/luci-app-vantage
 cp -a /tmp/vantage/luci-theme-vantage /tmp/vantage/luci-app-vantage package/
 chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
@@ -512,10 +512,17 @@ chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
 比特率，因为那是协商速率不是流量）；登录页从 HTTP 跳 HTTPS 的行为可以关掉
 （`uci set luci.main.vantage_https='stay'` 后 `uci commit luci`）。
 
-上游 1.1.0 还多发了一个**可选**附加包 `luci-app-vantage-aps`：把别的 OpenWrt 路由通过
-SSH 配对后并进仪表盘（每个接入点单独装，路由器上也要装）。它是独立的包，仪表盘没有它照常
-工作 —— 依赖方向是 aps → app —— 所以这个分支**没有**收它。上游自己的发布说明里也写作
-optional add-on。
+上游 1.2.0 带来的变化：仪表盘的 rpcd 插件需要的两个 ucode netlink 模块加载不进来时（别的
+发行版的 feed、厂商固件），以前可能让 rpcd 崩掉、连 LuCI 登录都不行；现在插件先加载这两个
+模块，失败只影响仪表盘的数据（24.10 与 25.12 本来就不受影响）。接在配对接入点自己某个网口
+上的设备，现在显示接入点在那里计到的速率。别的包可以给仪表盘放一块只读磁贴（实验性；按
+对方自己的权限可见，磁贴名旁边带对方的包 id）。
+
+上游还有两个**可选**附加包，这个分支都**没有**收：一个是 1.1.0 起的
+`luci-app-vantage-aps`（把别的 OpenWrt 路由通过 SSH 配对后并进仪表盘，每个接入点单独装，
+路由器上也要装），一个是 1.2.0 起的 `luci-app-vantage-traffic`（共享端口后面的设备按设备
+统计流量，实验性）。它们都是独立的包，仪表盘没有它们照常工作 —— 依赖方向是 add-on → app ——
+上游自己的发布说明里也写作 optional add-on。
 
 **不想要它**：把 `.config` 里的 `CONFIG_PACKAGE_luci-theme-vantage` 与
 `CONFIG_PACKAGE_luci-app-vantage` 去掉（`make defconfig` 后再编译）即可；主题包的
