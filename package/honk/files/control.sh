@@ -682,19 +682,32 @@ geodata_sources() {
 	if [ -z "$urls" ]; then
 		urls=$(geodata_refreshed_urls_json "$db")
 	fi
+	# 下载的出口：核心按路由规则走时，出口就落在 proxy 组上，组里没有可用的节点
+	# 时更新停在 group_unavailable（面板报「无法更新」—— 那不是地址也不是网络
+	# 的问题）。给它自己的路：直连。核心只认它自己写出来的那个形状
+	# （{"download":{"route":{"route":"direct"}}}；组则是
+	# {"route":{"route":"group","group":"<名字>"}}）—— 别的形状会让核心把整份设置
+	# 都丢掉（stored geodata settings are unusable and ignored），于是它退回自己
+	# 内置的清单，第一个地址是 raw.githubusercontent.com，墙内不通。
+	# 用户在面板里选过的出口不动。
+	route=$(sqlite3 "$db" "SELECT json_extract(record, '\$.download.route.route') FROM geodata_settings WHERE id=1;" 2>/dev/null)
+	[ -n "$route" ] || route='{"route":{"route":"direct"}}'
 	# 要改的字段
 	sets=''
 	[ -n "$urls" ] && sets="'\$.urls', json('$urls')"
 	if [ -n "$sets" ]; then
-		if ! sqlite3 "$db" "UPDATE geodata_settings SET record = json_set(CASE WHEN json_valid(record) THEN record ELSE '{}' END, $sets) WHERE id = 1;" >/dev/null 2>&1; then
-			echo '{"ok":false,"message":"sources_not_stored"}'
-			return 1
-		fi
+		sets="$sets, '\$.download', json('$route')"
+	else
+		sets="'\$.download', json('$route')"
+	fi
+	if ! sqlite3 "$db" "UPDATE geodata_settings SET record = json_set(CASE WHEN json_valid(record) THEN record ELSE '{}' END, $sets) WHERE id = 1;" >/dev/null 2>&1; then
+		echo '{"ok":false,"message":"sources_not_stored"}'
+		return 1
 	fi
 	if [ "$(sqlite3 "$db" 'SELECT count(*) FROM geodata_settings WHERE id=1;' 2>/dev/null)" != 1 ]; then
 		row="$(geodata_default_list_json)"
 		[ -n "$(geodata_configured_url)" ] && row="$urls"
-		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row')));" >/dev/null 2>&1; then
+		if ! sqlite3 "$db" "INSERT OR REPLACE INTO geodata_settings (id, record) VALUES (1, json_object('urls', json('$row'), 'download', json('$route')));" >/dev/null 2>&1; then
 			echo '{"ok":false,"message":"sources_not_stored"}'
 			return 1
 		fi

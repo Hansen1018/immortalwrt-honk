@@ -77,6 +77,21 @@ Side effects of the change:
 来源之后，跑一次 LuCI 的「立即更新」也会把它写回去（更新完顺带重启核心 —— 清单是核心启动
 时读进去的，只让它 reload 不会重读）。两条路下的字节因此一致。
 
+**下载的出口**：核心从状态库里取地理数据下载走的出口（`geodata.rs` 的
+`route(settings, sources)` 取 `sources.effective().download`）。库里没有出口时它按路由规则
+走 —— 规则把下载送进 `proxy` 组，组里没有可用节点时更新就停在 `group_unavailable`，面板报
+「无法更新」（**不是地址也不是网络的问题**）。所以清单里同时写死出口：直连。CDN 直连可达，
+下载不该依赖代理组是否可用。
+
+出口只能写成核心自己写出来的那个形状：`{"download":{"route":{"route":"direct"}}}`（组则是
+`{"route":{"route":"group","group":"<名字>"}}`）。核心读这份设置时开了 `deny_unknown_fields`，
+路由又是相邻标签的枚举，别的形状会让核心**整份丢掉**（日志：`stored geodata settings are
+unusable and ignored; the built-in sources apply`），于是它退回自己内置的清单 —— 第一个地址
+是 `raw.githubusercontent.com`，墙内不通，下到的不是规则集，核心再判「未通过校验」。
+
+LuCI 的「立即更新」装完文件后会重启核心：核心记着每个资产文件的哈希，文件换了它就不认
+（`asset_conflict`），得让它先看到新文件，面板的下一次更新才走得通。
+
 上游 2026.11.24.1 起的 `check_geo` 会检查地理数据文件是否缺失或小于 4 MiB（截断的规则
 集会让分流悄悄出错），启动时记一条日志，面板也会点名哪个文件要重新下载。这一行按我们的
 布局改了：上游看的是 `/usr/share/v2ray/*.dat`（他们那里更新就写在那里），我们这棵树的

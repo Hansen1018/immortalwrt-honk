@@ -116,17 +116,16 @@ LOG="/tmp/luci-app-honk.${TYPE}.log"
 # 清单更是启动时读进去的，reload 不会重读它 —— 面板改过来源后那份清单的第一个
 # 地址是 raw.githubusercontent.com，墙内不通，核心下到的不是合法的规则集，下一次
 # 面板更新就会失败。重启之前先把清单换成我们那一份（CDN 优先）。
+# 核心记着每个资产文件的哈希，文件换了它就不认（asset_conflict），所以核心得
+# 先看到新文件，面板的下一次更新才走得通 —— 重启就是让它看到。
 schedule_backend_restart() {
 	if /bin/pidof honk-core >/dev/null 2>&1; then
-		(
-			sleep 25
-			/usr/share/honk/control.sh geodata-sources >/dev/null 2>&1 || :
-			if /etc/init.d/honk restart >/dev/null 2>&1; then
-				echo "$(date '+%F %T') restarted honk-core"
-			else
-				echo "$(date '+%F %T') honk-core restart failed"
-			fi
-		) </dev/null >>"$LOG" 2>&1 &
+		/usr/share/honk/control.sh geodata-sources >/dev/null 2>&1 || :
+		if /etc/init.d/honk restart >/dev/null 2>&1; then
+			echo "$(date '+%F %T') restarted honk-core"
+		else
+			echo "$(date '+%F %T') honk-core restart failed"
+		fi
 	fi
 }
 
