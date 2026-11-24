@@ -112,14 +112,19 @@ fi
 LOCK="/tmp/luci-app-honk.${TYPE}.lock"
 LOG="/tmp/luci-app-honk.${TYPE}.log"
 
-schedule_backend_reload() {
+# 装好之后要重启核心，不是只让它重读配置：文件换了 inode，核心手里还是旧的；
+# 清单更是启动时读进去的，reload 不会重读它 —— 面板改过来源后那份清单的第一个
+# 地址是 raw.githubusercontent.com，墙内不通，核心下到的不是合法的规则集，下一次
+# 面板更新就会失败。重启之前先把清单换成我们那一份（CDN 优先）。
+schedule_backend_restart() {
 	if /bin/pidof honk-core >/dev/null 2>&1; then
 		(
 			sleep 25
-			if /usr/bin/honk-core reload >/dev/null 2>&1; then
-				echo "$(date '+%F %T') reloaded honk-core"
+			/usr/share/honk/control.sh geodata-sources >/dev/null 2>&1 || :
+			if /etc/init.d/honk restart >/dev/null 2>&1; then
+				echo "$(date '+%F %T') restarted honk-core"
 			else
-				echo "$(date '+%F %T') honk-core reload failed"
+				echo "$(date '+%F %T') honk-core restart failed"
 			fi
 		) </dev/null >>"$LOG" 2>&1 &
 	fi
@@ -193,7 +198,10 @@ fi
 			elif [ "$rc" = 0 ]; then
 				mv "$TMP" "$DEST"
 				echo "$(date '+%F %T') updated $DEST ($size bytes)"
-				schedule_backend_reload
+				# 清单换成我们那一份（面板写的那份第一个地址墙内不通）；核心随后重启
+				# 时读到的就是它，面板的更新也就走同一条路、下到同样的字节。
+				/usr/share/honk/control.sh geodata-sources >/dev/null 2>&1 || :
+				schedule_backend_restart
 			fi
 		fi
 	fi

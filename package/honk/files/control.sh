@@ -633,7 +633,10 @@ geodata_sources() {
 	[ -f "$db" ] && [ ! -L "$db" ] || { echo '{"ok":true,"message":"state_database_absent"}'; return 0; }
 	# 核心在跑的时候不动它的库：它手里的清单是启动时读进去的，改了库也要等
 	# 下次启动才生效。
-	[ -n "$(managed_core_pid 2>/dev/null)" ] && { echo '{"ok":true,"message":"core_running"}'; return 0; }
+	if [ "${HONK_GEODATA_FORCE:-0}" != 1 ] && [ -n "$(managed_core_pid 2>/dev/null)" ]; then
+		echo '{"ok":true,"message":"core_running"}'
+		return 0
+	fi
 	command -v sqlite3 >/dev/null 2>&1 || { echo '{"ok":false,"message":"sqlite_missing"}'; return 1; }
 	# 下载出口：不写。核心的直连出口用 global.bootstrap_resolver 解析下载目标
 	# 的域名（上游模板给的是 1.1.1.1:53 这样的公网解析器），在我们这边这条
@@ -2148,7 +2151,11 @@ case "$1" in
 		migrate_geodata_assets
 		;;
 	geodata-sources)
-		geodata_sources
+		# 核心在运行时改库也是安全的：核心的清单是启动时读进去的，调用方随后重启
+		# 它就生效（LuCI 的地理数据更新路径就是这么做的 —— 面板改过来源后，那份
+		# 清单的第一个地址是 raw.githubusercontent.com，墙内不通，核心下到的不是
+		# 合法的规则集，会被判成「未通过校验」）。
+		HONK_GEODATA_FORCE=1 geodata_sources
 		;;
 	sync-db)
 		sync_db "$2"
