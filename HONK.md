@@ -63,7 +63,7 @@ Side effects of the change:
 包的版本号与上游 [kenzok8/openwrt-honk](https://github.com/kenzok8/openwrt-honk) 的发布
 保持一致，**两个包各跟各的版本号**：上游每份发布都带一份 `release-manifest.json`，
 里面的 `honk_version` 与 `luci_version` 是分开的 —— 哪个包的内容变了，就只给它升
-版本，另一个不动。现在这里是 `honk` `2026.11.24.1-r1` 与 `luci-app-honk` `2026.11.24.1-r1`
+版本，另一个不动。现在这里是 `honk` `2026.11.24.2-r1` 与 `luci-app-honk` `2026.11.24.2-r1`
 （这一版上游两个包一起升：密钥改存 `secrets.dae`、模板不再预置 clash_api、私有域名走
 本机解析器、新增地理数据完整性检查；核心与面板归档都没变），与上游那份清单逐字一致。
 
