@@ -509,7 +509,7 @@ argv 访问不可得时，cgroup 钩子改用调用线程的 `comm`」。
 GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索、明暗主题、手机端底栏）
 和一个只读的实时仪表盘（上线状态、CPU/内存/无线/客户端、实时流量、防火墙概览）。
 
-两个包**原样**放在 `package/` 里（上游 v1.2.0，commit `a7ff63b715bc`，文件与上游逐字节
+两个包**原样**放在 `package/` 里（上游 v1.2.1，commit `fd2440318e1a`，文件与上游逐字节
 一致）：
 
 | 包 | 作用 |
@@ -530,10 +530,10 @@ GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索
 简体中文翻译一起编进来：`luci-i18n-vantage-theme-zh-cn`（主题）与
 `luci-i18n-vantage-zh-cn`（仪表盘）。
 
-**更新到上游新版本**（把下面的 `v1.2.0` 换成目标版本）：
+**更新到上游新版本**（把下面的 `v1.2.1` 换成目标版本）：
 
 ```sh
-git clone --depth 1 --branch v1.2.0 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
+git clone --depth 1 --branch v1.2.1 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
 rm -rf package/luci-theme-vantage package/luci-app-vantage
 cp -a /tmp/vantage/luci-theme-vantage /tmp/vantage/luci-app-vantage package/
 chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
@@ -553,12 +553,27 @@ chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
 上的设备，现在显示接入点在那里计到的速率。别的包可以给仪表盘放一块只读磁贴（实验性；按
 对方自己的权限可见，磁贴名旁边带对方的包 id）。
 
+上游 1.2.1 带来的变化：仪表盘的上行卡片里，如果设备上的 LAN 用了 VLAN（`eth0` 旁边还有
+`eth0.3`：交换机的主口，或一口跑所有东西），上行端口原来上下行显示同一个速率 —— 内核把那些
+VLAN 的流量也算在这个设备上，于是每个方向都读成「下载 + 上传」。现在仪表盘的上行卡片、图表
+和网络路径把这些 VLAN 的速率从网口自身摘掉（设备详情里的开机以来计数仍是设备自己的）；开了
+软件流量卸载时上传是对的，下载仍含上传（内核不统计已卸载连接在 VLAN 设备上带来的流量）。
+Wi-Fi 这一侧：靠各网络的密码（或 RADIUS）分到各自 VLAN 的客户端，现在会被列在那个网络下面
+（hostapd 把它们放在该 VLAN 的接口上，以前仪表盘和 LuCI 的无线页都看不见）；仪表盘也去问这些
+接口，客户端详情里带上接口名，流量算到对应网络和它的无线。配对的接入点：接入点自己为每个网络
+建的桥接地址以前会被当成多出来的有线客户端，现在接入点自己报这些地址，路由器把它们排除，
+接入点那一行写明有几个、详情里列出地址；路由器自己的 VLAN 是独立设备时（`eth0.1`、`eth0.3`），
+接入点在别的 VLAN 上的客户端也归到那个接入点下（以前算成路由器的有线主机）。**接入点那边
+也要装 1.2.1** 才认这些。端口磁贴与 LuCI 的端口状态：窄单元格里的错误数与丢包数原来会在
+最后一个词前断行（中文在任何接近最小的宽度下都会），现在在标签与计数之间断；LuCI 端口状态里
+的计数器与单位不再拆行。
+
 上游的 `luci-app-vantage-traffic`（1.2.0 起，实验性）这个分支**收了**：共享路由器某个网口
 的设备（交换机后面、或没配对的接入点后面）在仪表盘上按设备显示流量 —— 数据来自内核的连接
 计数，所以是「经过路由器的流量」，不是同一网段里设备之间的流量；它不加防火墙规则、不改
 sysctl、不起服务、不写配置文件，状态放在内存里的 `/var/run/vantage-traffic`。它读
 `/proc/net/nf_conntrack`，所以内核要有 `kmod-nf-conntrack`（我们镜像里本来就有 ✓）。依赖
-方向是 add-on → app（它要 1.2.0 或更新的仪表盘），所以仪表盘本身没有它也照常工作。
+方向是 add-on → app（它要 1.2.1 或更新的仪表盘），所以仪表盘本身没有它也照常工作。
 
 上游另一个附加包 `luci-app-vantage-aps`（1.1.0 起，把别的 OpenWrt 路由通过 SSH 配对后并进
 仪表盘）这个分支**没有**收：它要在每个接入点上单独装，是部署选择而不是固件的一部分。
