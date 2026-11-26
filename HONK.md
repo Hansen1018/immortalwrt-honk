@@ -63,11 +63,13 @@ Side effects of the change:
 包的版本号与上游 [kenzok8/openwrt-honk](https://github.com/kenzok8/openwrt-honk) 的发布
 保持一致，**两个包各跟各的版本号**：上游每份发布都带一份 `release-manifest.json`，
 里面的 `honk_version` 与 `luci_version` 是分开的 —— 哪个包的内容变了，就只给它升
-版本，另一个不动。现在这里是 `honk` `2026.11.24.2-r1` 与 `luci-app-honk` `2026.11.25-r1`
-（这一版上游只升了面板那个包：Doona 从 `0.1.0-rc.6` 到 `0.1.0-rc.7`，面板与预置模板变了，
-所以只有 `luci-app-honk` 跟版本；核心的 pin 仍是 `64848881`，没变。核心归档在上游新的
-源标签 `source-45581751340` 下重新发了一遍，所以三个 `HONK_HASH_*` 的值跟着换了 —— 里面
-还是同一个提交的代码，只是重新打的包），与上游那份清单逐字一致。
+版本，另一个不动。现在这里是 `honk` `2026.11.26-r1` 与 `luci-app-honk` `2026.11.26-r1`
+（这一版上游**两个包一起升**：核心的 pin 从 `64848881` 换到 `f7415d0a`，面板的 Doona 从
+`7fcffdda` 换到 `0ed10b68`（版本号仍是 `0.1.0-rc.7`，上游面板还没再发新的版本号）。
+上游这次唯一的代码改动是「Fix armv7 core build on upstream beta.7」（#79）：armv7 的核心
+在 beta.7 上构建不出来，这次修好了 —— 我们的目标设备是 armv8/aarch64，不受它影响，但 pin
+换了就跟着换了。核心归档在上游新的源标签 `source-45789344596` 下重新发了一遍，所以三个
+`HONK_HASH_*` 的值跟着换了），与上游那份清单逐字一致。
 
 面板里的「立即更新」用的清单和 LuCI 的「立即更新」不是同一份：面板在换来源时
 会自己写清单，而它的预设把 **raw 地址排在 jsDelivr 镜像前面**（上游 `src/dae/geodata.ts`
