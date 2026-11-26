@@ -583,3 +583,49 @@ sysctl、不起服务、不写配置文件，状态放在内存里的 `/var/run/
 **不想要它**：把 `.config` 里的 `CONFIG_PACKAGE_luci-theme-vantage` 与
 `CONFIG_PACKAGE_luci-app-vantage` 去掉（`make defconfig` 后再编译）即可；主题包的
 `postrm` 会把 LuCI 切回别的已注册主题，不会留下一指向不存在主题的配置。
+
+## 每次更新都要审查
+
+取上游的新版本、编译固件之后，**必须跑一遍审查脚本** —— 它是更新流程的最后一步：
+
+```bash
+bash /home/openwrt/immortalwrt/tools/honk-audit.sh
+```
+
+十项检查：树的干净与属主、我们跟上游的版本差、pin 与上游 `ci/pins.env` 是否一致、
+我们这层的文件还在不在、我们相对上游的本地改动清单（白名单）、上游自己的
+`scripts/check.sh` 与 `scripts/verify-source-assets.sh`（在合并后的树上跑）、
+**核心还认不认我们用到的接口**、**我们配置文件里的每个键新核心是否认识**、
+面板的代码是真变了还是只是重发、最后是产物（sha256、manifest 的版本、BTF、我们自己的脚本进没进镜像）。
+
+退出码：`0` = 干净；`2` = 只有警告（看一眼再刷）；`1` = 有失败（**别刷**，先修）。
+
+### 审查盯的是「我们这层 ↔ 上游」之间的接口
+
+上游一改就可能咬人的地方：
+
+- **核心的参数与行为**：`--store db`、db 模式下拒绝 Clash API
+  （`--store db runs without the Clash API`）、`configuration database is unavailable`、
+  `stored geodata settings are unusable`、`asset_conflict`、`group_unavailable` ——
+  我们的脚本按这些字面量判断，核心换了说法我们就会误判；
+- **状态库的那几张表**：`geodata_settings`、`revision`、`head`、`listener_secret`、
+  `sqlite_sequence` —— 我们的 `control.sh` 直接读写它们，清表清少了核心就起不来；
+- **配置文件里的键**：核心对未知字段是严格的（`deny_unknown_fields`），
+  我们多写一个核心不认识的键，整个配置就废了 —— 审查脚本拿上游的 `config.dae`
+  与核心二进制里的字段名比对；
+- **面板**：只换 `SOURCE` 头（同样的版本号、同样的产物字节）是「重发」，
+  真改了代码就要读上游的发布说明。
+
+### 白名单
+
+`tools/honk-audit-local-files.txt` 记着我们相对上游的全部本地改动（21 个文件）。
+上游动了白名单里的文件 ⇒ 审查脚本报「白名单过期」，提醒人**手工**合并；
+合并完确认无误，用 `--refresh-whitelist` 重新生成 —— 生成的 diff 要人看过再提交。
+
+### 审查每天自动跑一次
+
+cron `honk-update-audit` 每天跑一遍，**只在不干净时播报**（上游一发布新版本就会提醒）。
+取版本、合并、编译、再审查 —— 这四步缺一不可。
+
+刷完固件记得清 LuCI 缓存：浏览器硬刷新（Ctrl+Shift+R），或
+`rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/*`。

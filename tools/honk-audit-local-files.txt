@@ -1,0 +1,23 @@
+# honk-audit-local-files.txt
+# 我们这棵树相对上游的本地改动清单（每次更新后由 tools/honk-audit.sh 核对）。
+# 上游改了这里的某个文件 -> 审查脚本会报 WARN/FAIL，提醒人手工合并。
+honk/LICENSE
+honk/Makefile
+honk/files/90-honk-boot
+honk/files/config.dae
+honk/files/control.sh
+honk/files/geodata.sh
+honk/files/honk.config
+honk/files/honk.init
+honk/files/maintenance.sh
+honk/files/system.dae
+luci-app-honk/LICENSE
+luci-app-honk/Makefile
+luci-app-honk/htdocs/luci-static/resources/view/honk/maintenance.js
+luci-app-honk/htdocs/luci-static/resources/view/honk/overview.js
+luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js
+luci-app-honk/po/zh-cn/honk.po
+luci-app-honk/root/usr/libexec/rpcd/honk
+luci-app-honk/root/usr/share/luci-app-honk/refresh-index.sh
+luci-app-honk/root/usr/share/luci-app-honk/update-geo.sh
+luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
