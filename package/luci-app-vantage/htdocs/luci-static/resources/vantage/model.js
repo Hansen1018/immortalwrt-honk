@@ -1604,6 +1604,9 @@ return baseclass.extend({
 					ifname: ss.ifname,
 					/* the interface of a VLAN it is on, or null (#164) */
 					vlanIf: e.via,
+					/* the far end of a mesh interface: another node of the
+					   mesh, listed with the stations and no client (#167) */
+					peer: ss.mode === 'mesh',
 					ssid: ss.ssid,
 					ssidId: ss.id,
 					radio: ss.radio,
@@ -1629,7 +1632,7 @@ return baseclass.extend({
 				c.level = wifi.signal(c.signal);
 				c.legacyOnRadio = !!(radio && radio.std && wifi.genRank(c.gen) >= 0 && wifi.genRank(c.gen) < wifi.genRank(wifi.genName(radio.std, radio.band)) &&
 					wifi.genRank(c.gen) <= 4 && wifi.genRank(wifi.genName(radio.std, radio.band)) >= 6);
-				if (radio) { radio.clients++; if (c.legacyOnRadio) radio.legacy++; }
+				if (radio) { if (!c.peer) radio.clients++; if (c.legacyOnRadio) radio.legacy++; }
 				ss.clients++;
 				clients.push(c);
 			});
@@ -1782,13 +1785,15 @@ return baseclass.extend({
 		/* The addresses an access point reports as its own (#167): out of
 		   the wired hosts, and named on its own entry there (own), so that
 		   none is taken unseen. Not the MAC of a paired access point, nor
-		   one that another of them reports too, as its own, its station
-		   or its wired host: a contested claim takes nothing. And only
-		   while its own entry is a wired host here to carry them */
+		   one that another of them reports too, as its own or its
+		   station: a contested claim takes nothing. Another's wired host
+		   it may be: an access point hears the others' addresses on its
+		   ports as it hears any host's. And only while its own entry is a
+		   wired host here to carry them */
 		var claims = Object.create(null), apOwn = Object.create(null);
 		aps.forEach(function(a) {
 			var once = Object.create(null);
-			a.macs.concat(a.sta.map(function(x) { return x.mac; }), a.hosts.map(function(x) { return x.mac; })).forEach(function(m) {
+			a.macs.concat(a.sta.map(function(x) { return x.mac; })).forEach(function(m) {
 				if (!once[m]) { once[m] = true; claims[m] = (claims[m] || 0) + 1; }
 			});
 		});
@@ -1991,11 +1996,13 @@ return baseclass.extend({
 	},
 
 	/* SSIDs with the same name and security across radios -> one entry
-	   { key, ssid, security, bands: [..], ids: [..], clients } */
+	   { key, ssid, security, bands: [..], ids: [..], clients }. The same
+	   security is the same protocol at the same rating: WPA2 that lets
+	   TKIP in is not shown as the WPA2 beside it that does not */
 	groupSsids: function(ssids) {
 		var out = [], idx = Object.create(null);
 		arr(ssids).forEach(function(s) {
-			var k = s.ssid + '\u0000' + s.security.short;
+			var k = s.ssid + '\u0000' + s.security.short + '\u0000' + (s.security.tone || '');
 			if (!idx[k]) { idx[k] = { key: k, ssid: s.ssid, security: s.security, pmf: s.pmf, hidden: s.hidden, bands: [], ids: [], radios: [], clients: 0, up: false }; out.push(idx[k]); }
 			var g = idx[k];
 			if (s.band && g.bands.indexOf(s.band) < 0) g.bands.push(s.band);

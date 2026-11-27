@@ -511,7 +511,7 @@ argv 访问不可得时，cgroup 钩子改用调用线程的 `comm`」。
 GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索、明暗主题、手机端底栏）
 和一个只读的实时仪表盘（上线状态、CPU/内存/无线/客户端、实时流量、防火墙概览）。
 
-两个包**原样**放在 `package/` 里（上游 v1.2.1，commit `fd2440318e1a`，文件与上游逐字节
+两个包**原样**放在 `package/` 里（上游 v1.2.2，commit `a2e2eec0337`，文件与上游逐字节
 一致）：
 
 | 包 | 作用 |
@@ -532,13 +532,13 @@ GPL-3.0-or-later）：一套 LuCI 主题（图标栏、面包屑、Ctrl+K 搜索
 简体中文翻译一起编进来：`luci-i18n-vantage-theme-zh-cn`（主题）与
 `luci-i18n-vantage-zh-cn`（仪表盘）。
 
-**更新到上游新版本**（把下面的 `v1.2.1` 换成目标版本）：
+**更新到上游新版本**（把下面的 `v1.2.2` 换成目标版本）：
 
 ```sh
-git clone --depth 1 --branch v1.2.1 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
-rm -rf package/luci-theme-vantage package/luci-app-vantage
-cp -a /tmp/vantage/luci-theme-vantage /tmp/vantage/luci-app-vantage package/
-chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage
+git clone --depth 1 --branch v1.2.2 https://github.com/anothaDev/luci-theme-vantage.git /tmp/vantage
+rm -rf package/luci-theme-vantage package/luci-app-vantage package/luci-app-vantage-traffic
+cp -a /tmp/vantage/luci-theme-vantage /tmp/vantage/luci-app-vantage /tmp/vantage/luci-app-vantage-traffic package/
+chown -R openwrt:openwrt package/luci-theme-vantage package/luci-app-vantage package/luci-app-vantage-traffic
 ```
 
 上游 1.1.x 带来的变化：搜索（Ctrl+K 或 `/`）现在也能找到客户端（按名字、MAC、地址）、
@@ -569,6 +569,22 @@ Wi-Fi 这一侧：靠各网络的密码（或 RADIUS）分到各自 VLAN 的客�
 也要装 1.2.1** 才认这些。端口磁贴与 LuCI 的端口状态：窄单元格里的错误数与丢包数原来会在
 最后一个词前断行（中文在任何接近最小的宽度下都会），现在在标签与计数之间断；LuCI 端口状态里
 的计数器与单位不再拆行。
+
+上游 1.2.2 带来的变化：mesh（网状组网）的另一个节点原来被当成无线客户端列出来并计数，
+现在它带「Mesh peer」标签，网络的路径与搜索里把它算作 peer：peer 不再计入设备或射频的
+客户端数，不进「流量排行」，也不进信号检查的客户端计数（信号弱的仍然会警告）。配对接入点：
+接入点的上行设备带多个 VLAN 时（`eth0.1` 旁边还有 `eth0.3`），它以前只知道自己那个网络里的
+上行，把别的 VLAN 上听到的东西（别的接入点的桥、那些网络里的每台主机）当成自己的有线主机
+上报 ⇒ 路由器看到同一个地址有两份声明就都不采信，那些桥就一直挂在那儿、互相标着「在另一个
+接入点后面」。现在接入点把上行设备的其他 VLAN 排除掉，自己的地址在别的接入点把它列为有线
+主机时仍然站得住（**接入点那边也要装 1.2.2**）。安全：Dropbear 可以有多个 listener，每个都能
+带一个登录就跑的命令（`ForceCommand`）—— 那个命令会替掉密钥限定的那个命令。附加包以前只查
+第一个 listener，于是配对的路由器的密钥会在接入点上以 root 跑那个命令，而不是那份只读的报告；
+现在按配置与运行中的状态把所有接受 root 登录的 Dropbear 都查一遍，有这种命令就不放路由器进来
+（**这个分支没收 `luci-app-vantage-aps`，所以这条与我们无关**）。防火墙概览：以前靠 masquerade、
+wan 名与 IPv4 默认路由找「外网那一侧」，有独立的 IPv6 上行（隧道之类，在另一个 zone 里、名字也
+不同）时，它可能说「什么都没开」，而那个 zone 其实是全开的 —— 现在 IPv6 默认路由所在的接口
+也一起查。仪表盘布局：宽卡片上方那块矮卡片原来留了一块空白，现在它拉到与宽卡片齐平。
 
 上游的 `luci-app-vantage-traffic`（1.2.0 起，实验性）这个分支**收了**：共享路由器某个网口
 的设备（交换机后面、或没配对的接入点后面）在仪表盘上按设备显示流量 —— 数据来自内核的连接
