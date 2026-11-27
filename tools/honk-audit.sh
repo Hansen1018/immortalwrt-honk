@@ -290,6 +290,91 @@ else
   warn "no built images yet (bin/targets/rockchip/armv8)"
 fi
 
+head_ "11) the vantage theme (our copy vs the upstream tag)"
+NODE_BIN="$(command -v node 2>/dev/null || echo /root/.nvm/versions/node/v26.13.0/bin/node)"
+if [ ! -x "$NODE_BIN" ]; then warn "node is not available: the vantage checks are skipped"; fi
+V_REPO="${AUDIT_VANTAGE:-https://github.com/anothaDev/luci-theme-vantage.git}"
+if [ "$QUICK" = "1" ] && [ -d "$WORK/vantage/.git" ]; then
+  :
+else
+  rm -rf "$WORK/vantage"
+  timeout 900 git clone --quiet --filter=blob:none --no-checkout "$V_REPO" "$WORK/vantage" >/dev/null 2>&1 \
+    || { warn "cannot clone the vantage upstream"; }
+fi
+if [ -d "$WORK/vantage/.git" ]; then
+  cd "$WORK/vantage"
+  git fetch --quiet --tags --force origin 2>/dev/null
+  V_LATEST=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]' | head -1)
+  printf '        the latest vantage tag: %s\n' "${V_LATEST:-none}"
+  rm -rf "$WORK/vantage-work"
+  git worktree add --quiet "$WORK/vantage-work" "$V_LATEST" >/dev/null 2>&1
+  VPKGS="luci-app-vantage luci-app-vantage-traffic luci-theme-vantage"
+  for vp in $VPKGS; do
+    [ -d "$TREE/package/$vp" ] || { bad "the package $vp is missing from the tree"; continue; }
+    uv=$(sed -n 's/^PKG_VERSION:=//p' "$TREE/package/$vp/Makefile" | head -1)
+    tv=$(git show "$V_LATEST:$vp/Makefile" 2>/dev/null | sed -n 's/^PKG_VERSION:=//p' | head -1)
+    if [ "$uv" = "$tv" ]; then ok "$vp is at the upstream version ($uv)"; else bad "$vp is $uv but the upstream $V_LATEST is $tv"; fi
+  done
+  # our copy must be byte identical to the upstream (a clean replace)
+  python3 - "$TREE" "$WORK/vantage-work" "$VPKGS" <<'PY2'
+import io, os, sys
+tree, up, pkgs = sys.argv[1], sys.argv[2], sys.argv[3].split()
+def files(root, sub):
+    out = {}
+    base = os.path.join(root, sub)
+    for dp, _d, fs in os.walk(base):
+        for f in fs:
+            p = os.path.join(dp, f)
+            out[os.path.relpath(p, base)] = io.open(p, "rb").read()
+    return out
+diff = []
+for pkg in pkgs:
+    ours = files(tree, os.path.join("package", pkg))
+    theirs = files(up, pkg)
+    for rel in sorted(set(ours) | set(theirs)):
+        if ours.get(rel) != theirs.get(rel):
+            diff.append("%s/%s" % (pkg, rel))
+print("        the delta vs the upstream tag: %d files" % len(diff))
+for d in diff[:20]:
+    print("        + %s" % d)
+sys.exit(3 if diff else 0)
+PY2
+  RC=$?
+  if [ "$RC" = "3" ]; then
+    warn "our vantage copy is not identical to the upstream -> a merge or a copy mistake"
+  elif [ "$RC" = "0" ]; then
+    ok "our vantage copy is byte identical to the upstream"
+  else
+    FAIL=$((FAIL+1))
+  fi
+  # the upstream's own security checks (plain node, no dependencies)
+  cd "$WORK/vantage-work" 2>/dev/null
+  for t in security-tests/check_dom_sinks.js security-tests/test_templates.js \
+           security-tests/test_acl_policy.js security-tests/check_private_addresses.js; do
+    if [ -f "$t" ]; then
+      if timeout 300 "$NODE_BIN" "$t" >"$WORK/vg-test.log" 2>&1; then ok "the upstream check passes: $t"; else bad "the upstream check FAILS: $t"; tail -6 "$WORK/vg-test.log" | sed 's/^/        /'; fi
+    fi
+  done
+  if [ -d tests ]; then
+    timeout 900 "$NODE_BIN" --test tests/ >"$WORK/vg-unit.log" 2>&1
+    RCU=$?
+    PASS=$(sed -n 's/^[^0-9]*pass \([0-9][0-9]*\).*/\1/p' "$WORK/vg-unit.log" | tail -1)
+    FAILL=$(sed -n 's/^[^0-9]*fail \([0-9][0-9]*\).*/\1/p' "$WORK/vg-unit.log" | tail -1)
+    [ -n "$PASS" ] || PASS=$(grep -c "^ok " "$WORK/vg-unit.log" 2>/dev/null)
+    [ -n "$FAILL" ] || FAILL=$(grep -c "^not ok " "$WORK/vg-unit.log" 2>/dev/null)
+    printf '        the upstream unit tests: %s ok, %s failed\n' "${PASS:-0}" "${FAILL:-0}"
+    if [ "$RCU" != "0" ]; then
+      warn "the upstream unit tests have failures (the ucode plugin tests need the SDK's ucode -- not our tree)"
+      grep "^not ok " "$WORK/vg-unit.log" 2>/dev/null | head -6 | cut -c1-140 | sed 's/^/        /'
+    else
+      ok "the upstream unit tests pass"
+    fi
+  fi
+  cd "$TREE"
+else
+  warn "skipped (no vantage clone)"
+fi
+
 head_ "the verdict"
 printf '  the failures: %d   the warnings: %d\n' "$FAIL" "$WARN"
 if [ "$FAIL" -gt 0 ]; then
